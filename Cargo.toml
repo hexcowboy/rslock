@@ -1,0 +1,17 @@
+[package]
+
+name = "redlock-rs"
+version = "0.1.0"
+authors = ["Jan-Erik Rediger <badboy@archlinux.us>"]
+
+[lib]
+name = "redlock"
+path = "src/lib.rs"
+
+[[bin]]
+name = "redlock"
+path = "src/main.rs"
+doc  = false
+
+[dependencies.redis-rs]
+git = "https://github.com/mitsuhiko/redis-rs"
