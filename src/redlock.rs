@@ -16,7 +16,12 @@ const UNLOCK_SCRIPT : &'static str = r"if redis.call('get',KEYS[1]) == ARGV[1] t
                                         return 0
                                       end";
 
+/// The lock manager.
+///
+/// Implements the necessary functionality to acquire and release locks
+/// and handles the Redis connections.
 pub struct RedLock {
+    /// List of all Redis clients
     pub servers: Vec<redis::Client>,
     quorum: uint,
     retry_count: int,
@@ -24,12 +29,20 @@ pub struct RedLock {
 }
 
 pub struct Lock<'a> {
+    /// The resource to lock. Will be used as the key in Redis.
     pub resource: &'a [u8],
+    /// The value for this lock.
     pub val: Vec<u8>,
+    /// Time the lock is still valid.
+    /// Should only be slightly smaller than the requested TTL.
     pub validity_time: uint
 }
 
 impl RedLock {
+    /// Create a new lock manager instance, defined by the given Redis connection uris.
+    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
+    ///
+    /// Sample URI: `"redis://127.0.0.1:6379"`
     pub fn new(uris: Vec<&str>) -> RedLock {
         let quorum = uris.len() / 2 + 1;
         let mut servers = Vec::with_capacity(uris.len());
@@ -46,11 +59,16 @@ impl RedLock {
         }
     }
 
+    /// Get 20 random bytes from `/dev/urandom`.
     pub fn get_unique_lock_id(&self) -> IoResult<Vec<u8>> {
         let mut file = File::open(&Path::new("/dev/urandom"));
         file.read_exact(20)
     }
 
+    /// Set retry count and retry delay.
+    ///
+    /// Retry count defaults to `3`.
+    /// Retry delay defaults to `200`.
     pub fn set_retry(&mut self, count: int, delay: int) {
         self.retry_count = count;
         self.retry_delay = delay;
@@ -76,6 +94,13 @@ impl RedLock {
         time.sec * 1000 + ((time.nsec/1000000) as i64)
     }
 
+    /// Acquire the lock for the given resource and the requested TTL.
+    ///
+    /// If it succeeds, a `Lock` instance is returned,
+    /// including the value and the validity time
+    ///
+    /// If it fails. `None` is returned.
+    /// A user should retry after a short wait time.
     pub fn lock<'a>(&'a self, resource: &'a [u8], ttl: uint) -> Option<Lock> {
         let val = self.get_unique_lock_id().unwrap();
 
@@ -125,6 +150,10 @@ impl RedLock {
         }
     }
 
+    /// Unlock the given lock.
+    ///
+    /// Unlock is best effort. It will simply try to contact all instances
+    /// and remove the key.
     pub fn unlock(&self, lock: &Lock) {
         for &ref client in self.servers.iter() {
             self.unlock_instance(client, lock.resource, lock.val.as_slice());

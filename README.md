@@ -3,7 +3,6 @@
 This is an implementation of Redlock, the [distributed locking mechanism][distlock] built on top of Redis.
 It is more or less a port of the [Ruby version][redlock.rb].
 
-It currently lacks documentation. I write that ASAP.  
 It includes a sample application in [main.rs](src/main.rs).
 
 ## Build
