@@ -1,5 +1,6 @@
 use redis;
-use redis::{RedisResult, Value, Nil, Okay};
+use redis::{RedisResult,Value};
+use redis::Value::{Nil, Okay};
 use std::io::{File, IoResult};
 use std::io::timer::sleep;
 use std::time::duration::Duration;
@@ -169,7 +170,7 @@ fn test_redlock_get_unique_id() {
         Ok(id) => {
             assert_eq!(20, id.len());
         },
-        err => fail!("Error thrown: {}", err)
+        err => panic!("Error thrown: {}", err)
     }
 }
 
@@ -249,7 +250,7 @@ fn test_redlock_lock() {
             assert_eq!(20, lock.val.len());
             assert!(lock.validity_time > 900);
         },
-        None => fail!("Lock failed")
+        None => panic!("Lock failed")
     }
 }
 
@@ -264,7 +265,7 @@ fn test_redlock_lock_unlock() {
     assert!(lock.validity_time > 900);
 
     match rl2.lock(key[], 1000) {
-        Some(l) => fail!("Lock acquired, even though it should be locked"),
+        Some(_l) => panic!("Lock acquired, even though it should be locked"),
         None => ()
     }
 
@@ -272,6 +273,6 @@ fn test_redlock_lock_unlock() {
 
     match rl2.lock(key[], 1000) {
         Some(l) => assert!(l.validity_time > 900),
-        None => fail!("Lock couldn't be acquired")
+        None => panic!("Lock couldn't be acquired")
     }
 }
