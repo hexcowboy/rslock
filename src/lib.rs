@@ -24,11 +24,6 @@
 //! rl.unlock(&lock);
 //! ```
 
-#![crate_name = "redlock"]
-#![crate_type = "lib"]
-#![license = "BSD"]
-#![comment = "Distributed Lock on top of Redis"]
-
 #![feature(slicing_syntax)]
 #![experimental]
 
