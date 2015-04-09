@@ -45,7 +45,7 @@ cargo test
 Run sample application with:
 
 ```
-./target/release/redlock
+cargo run --release
 ```
 
 ## Contribute
