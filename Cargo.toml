@@ -20,3 +20,4 @@ doc  = false
 [dependencies]
 redis = "*"
 time  = "*"
+rand  = "*"

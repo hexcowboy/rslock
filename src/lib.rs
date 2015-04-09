@@ -24,11 +24,9 @@
 //! rl.unlock(&lock);
 //! ```
 
-#![feature(slicing_syntax)]
-#![experimental]
-
 extern crate redis;
 extern crate time;
+extern crate rand;
 
 pub use redlock::{RedLock, Lock};
 mod redlock;
