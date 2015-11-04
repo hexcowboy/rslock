@@ -35,7 +35,7 @@ pub fn main() {
 
     for _ in 0..number_of_workers {
         let tx = tx.clone();
-        let _ = thread::scoped(move|| {
+        let _ = thread::spawn(move|| {
             let between = Range::new(0, 5);
             let mut rng = rand::thread_rng();
 
