@@ -1,7 +1,7 @@
 [package]
 
 name = "redlock"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Jan-Erik Rediger <badboy@archlinux.us>"]
 
 keywords = ["distributed", "locking"]
