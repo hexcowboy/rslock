@@ -23,6 +23,6 @@ path = "src/main.rs"
 doc  = false
 
 [dependencies]
-redis = "*"
-time  = "*"
-rand  = "*"
+redis = "0.5.1"
+time = "0.1.33"
+rand = "0.3.11"
