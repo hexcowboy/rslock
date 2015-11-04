@@ -13,15 +13,6 @@ repository = "https://github.com/badboy/redlock-rs"
 license = "BSD-3-Clause"
 readme = "README.md"
 
-[lib]
-name = "redlock"
-path = "src/lib.rs"
-
-[[bin]]
-name = "redlock"
-path = "src/main.rs"
-doc  = false
-
 [dependencies]
 redis = "0.5.1"
 time = "0.1.33"
