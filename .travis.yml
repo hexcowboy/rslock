@@ -6,6 +6,7 @@ addons:
       - libcurl4-openssl-dev
       - libelf-dev
       - libdw-dev
+      - redis-server
 
 # run builds for both all the trains
 rust:
@@ -16,12 +17,14 @@ rust:
 before_script:
   - |
       pip install 'travis-cargo<0.2' --user &&
-      export PATH=$HOME/.local/bin:$PATH
+      export PATH=$HOME/.local/bin:$PATH &&
+      make start
 
 script:
   - |
       travis-cargo build &&
       travis-cargo test &&
+      make stop &&
       travis-cargo --only stable doc
 after_success:
   - travis-cargo --only stable doc-upload
