@@ -4,7 +4,8 @@ use redis::Value::{Nil, Okay};
 use std::fs::File;
 use std::path::Path;
 use std::io::{self,Read};
-use std::thread::sleep_ms;
+use std::thread::sleep;
+use std::time::Duration;
 use rand;
 use rand::distributions::{IndependentSample, Range};
 use time;
@@ -139,7 +140,7 @@ impl RedLock {
             }
 
             let n = between.ind_sample(&mut rng);
-            sleep_ms(n);
+            sleep(Duration::from_millis(n as u64));
         }
         return None
     }
