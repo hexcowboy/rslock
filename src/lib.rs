@@ -25,7 +25,6 @@
 //! ```
 
 extern crate redis;
-extern crate time;
 extern crate rand;
 
 pub use redlock::{RedLock, Lock};
