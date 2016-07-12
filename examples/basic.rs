@@ -3,10 +3,10 @@ extern crate redis;
 extern crate rand;
 
 use redlock::RedLock;
-use std::thread::sleep_ms;
 use rand::distributions::{IndependentSample, Range};
 use std::env;
 use std::thread;
+use std::time::Duration;
 use std::sync::mpsc::channel;
 
 pub fn main() {
@@ -53,7 +53,7 @@ pub fn main() {
                 let val : i32 = redis::cmd("GET").arg(incr_key).query(&con).unwrap_or(0);
 
                 let n = between.ind_sample(&mut rng);
-                sleep_ms(n);
+                thread::sleep(Duration::from_millis(n));
 
                 redis::cmd("SET").arg(incr_key).arg(val+1).execute(&con);
 

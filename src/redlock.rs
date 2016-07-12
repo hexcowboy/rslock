@@ -1,14 +1,13 @@
 use redis;
-use redis::{RedisResult,Value};
+use redis::{RedisResult, Value};
 use redis::Value::{Nil, Okay};
 use std::fs::File;
 use std::path::Path;
-use std::io::{self,Read};
+use std::io::{self, Read};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use rand;
 use rand::distributions::{IndependentSample, Range};
-use time;
 
 const DEFAULT_RETRY_COUNT : u32 = 3;
 const DEFAULT_RETRY_DELAY : u32 = 200;
@@ -96,12 +95,6 @@ impl RedLock {
         }
     }
 
-    fn get_time(&self) -> i64 {
-        let time = time::get_time();
-
-        time.sec * 1000 + ((time.nsec/1000000) as i64)
-    }
-
     /// Acquire the lock for the given resource and the requested TTL.
     ///
     /// If it succeeds, a `Lock` instance is returned,
@@ -117,15 +110,16 @@ impl RedLock {
 
         for _ in 0..self.retry_count {
             let mut n = 0;
-            let start_time = self.get_time();
+            let start_time = Instant::now();
             for &ref client in self.servers.iter() {
                 if self.lock_instance(client, resource, &val, ttl) {
                     n += 1;
                 }
             }
 
-            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as i64 + 2;
-            let validity_time = (ttl as i64 - ((self.get_time() - start_time)) - drift as i64) as usize;
+            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
+            let elapsed = start_time.elapsed();
+            let validity_time = ttl - drift - elapsed.as_secs() as usize * 1000 - elapsed.subsec_nanos() as usize / 1000_000;
 
             if n >= self.quorum && validity_time > 0 {
                 return Some(Lock {

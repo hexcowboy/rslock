@@ -15,5 +15,4 @@ readme = "README.md"
 
 [dependencies]
 redis = "0.5.1"
-time = "0.1.33"
-rand = "0.3.11"
+rand = "0.3.14"
