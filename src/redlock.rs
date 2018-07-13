@@ -32,12 +32,14 @@ pub struct RedLock {
 
 pub struct Lock<'a> {
     /// The resource to lock. Will be used as the key in Redis.
-    pub resource: &'a [u8],
+    pub resource: Vec<u8>,
     /// The value for this lock.
     pub val: Vec<u8>,
     /// Time the lock is still valid.
     /// Should only be slightly smaller than the requested TTL.
-    pub validity_time: usize
+    pub validity_time: usize,
+    /// Used to limit the lifetime of a lock to its lock manager.
+    pub lock_manager: &'a RedLock
 }
 
 impl RedLock {
@@ -102,7 +104,7 @@ impl RedLock {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub fn lock<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Option<Lock> {
+    pub fn lock(&self, resource: &[u8], ttl: usize) -> Option<Lock> {
         let val = self.get_unique_lock_id().unwrap();
 
         let between = Range::new(0, self.retry_delay);
@@ -123,7 +125,8 @@ impl RedLock {
 
             if n >= self.quorum && validity_time > 0 {
                 return Some(Lock {
-                    resource: resource.clone(),
+                    lock_manager: self,
+                    resource: resource.to_vec(),
                     val: val,
                     validity_time: validity_time
                 });
@@ -158,7 +161,7 @@ impl RedLock {
     /// and remove the key.
     pub fn unlock(&self, lock: &Lock) {
         for &ref client in self.servers.iter() {
-            self.unlock_instance(client, lock.resource, &lock.val);
+            self.unlock_instance(client, &lock.resource, &lock.val);
         }
     }
 }
@@ -236,7 +239,7 @@ fn test_redlock_unlock() {
     let con = rl.servers[0].get_connection().unwrap();
     let _ : () = redis::cmd("SET").arg(&*key).arg(&*val).query(&con).unwrap();
 
-    let lock = Lock { resource: &key, val: val, validity_time: 0 };
+    let lock = Lock { lock_manager: &rl, resource: key, val: val, validity_time: 0 };
     assert_eq!((), rl.unlock(&lock))
 }
 
@@ -247,7 +250,7 @@ fn test_redlock_lock() {
     let key = rl.get_unique_lock_id().unwrap();
     match rl.lock(&key, 1000) {
         Some(lock) => {
-            assert_eq!(&*key, lock.resource);
+            assert_eq!(key, lock.resource);
             assert_eq!(20, lock.val.len());
             assert!(lock.validity_time > 900);
         },
