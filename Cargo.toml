@@ -15,5 +15,5 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-redis = "0.5.1"
+redis = "0.13.0"
 rand = "0.7.2"

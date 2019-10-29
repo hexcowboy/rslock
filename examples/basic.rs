@@ -28,8 +28,8 @@ pub fn main() {
     );
 
     let client = redis::Client::open("redis://127.0.0.1:6380/").unwrap();
-    let con = client.get_connection().unwrap();
-    redis::cmd("DEL").arg(incr_key).execute(&con);
+    let mut con = client.get_connection().unwrap();
+    redis::cmd("DEL").arg(incr_key).execute(&mut con);
 
     for _ in 0..number_of_workers {
         let tx = tx.clone();
@@ -41,7 +41,7 @@ pub fn main() {
                 "redis://127.0.0.1:6381/",
                 "redis://127.0.0.1:6382/",
             ]);
-            let con = rl.servers[0].get_connection().unwrap();
+            let mut con = rl.servers[0].get_connection().unwrap();
 
             for _ in 0..number_of_incrs {
                 let lock;
@@ -51,12 +51,15 @@ pub fn main() {
                         break;
                     }
                 }
-                let val: i32 = redis::cmd("GET").arg(incr_key).query(&con).unwrap_or(0);
+                let val: i32 = redis::cmd("GET").arg(incr_key).query(&mut con).unwrap_or(0);
 
                 let n = rng.gen_range(0, 5);
                 thread::sleep(Duration::from_millis(n));
 
-                redis::cmd("SET").arg(incr_key).arg(val + 1).execute(&con);
+                redis::cmd("SET")
+                    .arg(incr_key)
+                    .arg(val + 1)
+                    .execute(&mut con);
 
                 rl.unlock(&lock);
             }
@@ -75,7 +78,7 @@ pub fn main() {
         i += 1;
     }
 
-    let actual_result: u32 = redis::cmd("GET").arg(incr_key).query(&con).unwrap_or(0);
+    let actual_result: u32 = redis::cmd("GET").arg(incr_key).query(&mut con).unwrap_or(0);
 
     println!("Expected result: {}", result);
     println!("Actual result:   {}", actual_result);

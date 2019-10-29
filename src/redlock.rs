@@ -1,5 +1,5 @@
 use rand::{thread_rng, Rng};
-use redis::Value::{Nil, Okay};
+use redis::Value::Okay;
 use redis::{RedisResult, Value};
 
 use std::fs::File;
@@ -91,7 +91,7 @@ impl RedLock {
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let con = match client.get_connection() {
+        let mut con = match client.get_connection() {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -101,12 +101,10 @@ impl RedLock {
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query(&con);
+            .query(&mut con);
         match result {
             Ok(Okay) => true,
-            Ok(Nil) => false,
-            Ok(_) => false,
-            Err(_) => false,
+            Ok(_) | Err(_) => false,
         }
     }
 
@@ -158,12 +156,12 @@ impl RedLock {
     }
 
     fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
-        let con = match client.get_connection() {
+        let mut con = match client.get_connection() {
             Err(_) => return false,
             Ok(val) => val,
         };
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(&con);
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(&mut con);
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
@@ -239,8 +237,8 @@ fn test_redlock_direct_unlock_succeeds() {
     let key = rl.get_unique_lock_id().unwrap();
 
     let val = rl.get_unique_lock_id().unwrap();
-    let con = rl.servers[0].get_connection().unwrap();
-    redis::cmd("SET").arg(&*key).arg(&*val).execute(&con);
+    let mut con = rl.servers[0].get_connection().unwrap();
+    redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
 
     assert_eq!(true, rl.unlock_instance(&rl.servers[0], &key, &val))
 }
@@ -255,9 +253,9 @@ fn test_redlock_direct_lock_succeeds() {
     let key = rl.get_unique_lock_id().unwrap();
 
     let val = rl.get_unique_lock_id().unwrap();
-    let con = rl.servers[0].get_connection().unwrap();
+    let mut con = rl.servers[0].get_connection().unwrap();
 
-    redis::cmd("DEL").arg(&*key).execute(&con);
+    redis::cmd("DEL").arg(&*key).execute(&mut con);
     assert_eq!(true, rl.lock_instance(&rl.servers[0], &*key, &*val, 1000))
 }
 
@@ -271,8 +269,12 @@ fn test_redlock_unlock() {
     let key = rl.get_unique_lock_id().unwrap();
 
     let val = rl.get_unique_lock_id().unwrap();
-    let con = rl.servers[0].get_connection().unwrap();
-    let _: () = redis::cmd("SET").arg(&*key).arg(&*val).query(&con).unwrap();
+    let mut con = rl.servers[0].get_connection().unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&*key)
+        .arg(&*val)
+        .query(&mut con)
+        .unwrap();
 
     let lock = Lock {
         lock_manager: &rl,
