@@ -1,9 +1,6 @@
-extern crate rand;
-extern crate redis;
-extern crate redlock;
-
-use rand::distributions::{IndependentSample, Range};
+use rand::Rng;
 use redlock::RedLock;
+
 use std::env;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -37,7 +34,6 @@ pub fn main() {
     for _ in 0..number_of_workers {
         let tx = tx.clone();
         let _ = thread::spawn(move || {
-            let between = Range::new(0, 5);
             let mut rng = rand::thread_rng();
 
             let rl = RedLock::new(vec![
@@ -57,7 +53,7 @@ pub fn main() {
                 }
                 let val: i32 = redis::cmd("GET").arg(incr_key).query(&con).unwrap_or(0);
 
-                let n = between.ind_sample(&mut rng);
+                let n = rng.gen_range(0, 5);
                 thread::sleep(Duration::from_millis(n));
 
                 redis::cmd("SET").arg(incr_key).arg(val + 1).execute(&con);

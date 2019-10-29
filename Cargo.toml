@@ -16,4 +16,4 @@ edition = "2018"
 
 [dependencies]
 redis = "0.5.1"
-rand = "0.3.14"
+rand = "0.7.2"

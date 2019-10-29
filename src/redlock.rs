@@ -1,6 +1,4 @@
-use rand;
-use rand::distributions::{IndependentSample, Range};
-use redis;
+use rand::{thread_rng, Rng};
 use redis::Value::{Nil, Okay};
 use redis::{RedisResult, Value};
 
@@ -122,8 +120,7 @@ impl RedLock {
     pub fn lock(&self, resource: &[u8], ttl: usize) -> Option<Lock> {
         let val = self.get_unique_lock_id().unwrap();
 
-        let between = Range::new(0, self.retry_delay);
-        let mut rng = rand::thread_rng();
+        let mut rng = thread_rng();
 
         for _ in 0..self.retry_count {
             let mut n = 0;
@@ -154,7 +151,7 @@ impl RedLock {
                 }
             }
 
-            let n = between.ind_sample(&mut rng);
+            let n = rng.gen_range(0, self.retry_delay);
             sleep(Duration::from_millis(u64::from(n)));
         }
         None
