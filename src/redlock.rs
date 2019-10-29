@@ -3,9 +3,9 @@ use rand::distributions::{IndependentSample, Range};
 use redis;
 use redis::Value::{Nil, Okay};
 use redis::{RedisResult, Value};
+
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,7 @@ impl RedLock {
 
     /// Get 20 random bytes from `/dev/urandom`.
     pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
-        let file = File::open(&Path::new("/dev/urandom")).unwrap();
+        let file = File::open("/dev/urandom")?;
         let mut buf = Vec::with_capacity(20);
         match file.take(20).read_to_end(&mut buf) {
             Ok(20) => Ok(buf),
