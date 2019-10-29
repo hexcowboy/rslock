@@ -50,12 +50,9 @@ pub fn main() {
             for _ in 0..number_of_incrs {
                 let lock;
                 loop {
-                    match rl.lock(resource.as_bytes(), 1000) {
-                        Some(l) => {
-                            lock = l;
-                            break;
-                        }
-                        None => (),
+                    if let Some(l) = rl.lock(resource.as_bytes(), 1000) {
+                        lock = l;
+                        break;
                     }
                 }
                 let val: i32 = redis::cmd("GET").arg(incr_key).query(&con).unwrap_or(0);

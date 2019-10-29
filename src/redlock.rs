@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY: u32 = 200;
 const CLOCK_DRIFT_FACTOR: f32 = 0.01;
-const UNLOCK_SCRIPT: &'static str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
-                                        return redis.call('del',KEYS[1])
-                                      else
-                                        return 0
-                                      end";
+const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
+                                return redis.call('del',KEYS[1])
+                              else
+                                return 0
+                              end";
 
 /// The lock manager.
 ///
@@ -56,8 +56,8 @@ impl RedLock {
         }
 
         RedLock {
-            servers: servers,
-            quorum: quorum,
+            servers,
+            quorum,
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
@@ -68,14 +68,12 @@ impl RedLock {
         let file = File::open(&Path::new("/dev/urandom")).unwrap();
         let mut buf = Vec::with_capacity(20);
         match file.take(20).read_to_end(&mut buf) {
-            Ok(20) => return Ok(buf),
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Can't read enough random bytes",
-                ))
-            }
-            Err(e) => return Err(e),
+            Ok(20) => Ok(buf),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Can't read enough random bytes",
+            )),
+            Err(e) => Err(e),
         }
     }
 
@@ -107,10 +105,10 @@ impl RedLock {
             .arg(ttl)
             .query(&con);
         match result {
-            Ok(Okay) => return true,
-            Ok(Nil) => return false,
-            Ok(_) => return false,
-            Err(_) => return false,
+            Ok(Okay) => true,
+            Ok(Nil) => false,
+            Ok(_) => false,
+            Err(_) => false,
         }
     }
 
@@ -130,7 +128,7 @@ impl RedLock {
         for _ in 0..self.retry_count {
             let mut n = 0;
             let start_time = Instant::now();
-            for &ref client in self.servers.iter() {
+            for client in &self.servers {
                 if self.lock_instance(client, resource, &val, ttl) {
                     n += 1;
                 }
@@ -141,25 +139,25 @@ impl RedLock {
             let validity_time = ttl
                 - drift
                 - elapsed.as_secs() as usize * 1000
-                - elapsed.subsec_nanos() as usize / 1000_000;
+                - elapsed.subsec_nanos() as usize / 1_000_000;
 
             if n >= self.quorum && validity_time > 0 {
                 return Some(Lock {
                     lock_manager: self,
                     resource: resource.to_vec(),
-                    val: val,
-                    validity_time: validity_time,
+                    val,
+                    validity_time,
                 });
             } else {
-                for &ref client in self.servers.iter() {
+                for client in &self.servers {
                     self.unlock_instance(client, resource, &val);
                 }
             }
 
             let n = between.ind_sample(&mut rng);
-            sleep(Duration::from_millis(n as u64));
+            sleep(Duration::from_millis(u64::from(n)));
         }
-        return None;
+        None
     }
 
     fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
@@ -170,8 +168,8 @@ impl RedLock {
         let script = redis::Script::new(UNLOCK_SCRIPT);
         let result: RedisResult<i32> = script.key(resource).arg(val).invoke(&con);
         match result {
-            Ok(val) => return val == 1,
-            Err(_) => return false,
+            Ok(val) => val == 1,
+            Err(_) => false,
         }
     }
 
@@ -180,7 +178,7 @@ impl RedLock {
     /// Unlock is best effort. It will simply try to contact all instances
     /// and remove the key.
     pub fn unlock(&self, lock: &Lock) {
-        for &ref client in self.servers.iter() {
+        for client in &self.servers {
             self.unlock_instance(client, &lock.resource, &lock.val);
         }
     }
@@ -282,7 +280,7 @@ fn test_redlock_unlock() {
     let lock = Lock {
         lock_manager: &rl,
         resource: key,
-        val: val,
+        val,
         validity_time: 0,
     };
     assert_eq!((), rl.unlock(&lock))
