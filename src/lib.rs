@@ -24,8 +24,8 @@
 //! rl.unlock(&lock);
 //! ```
 
-extern crate redis;
 extern crate rand;
+extern crate redis;
 
-pub use redlock::{RedLock, Lock};
+pub use redlock::{Lock, RedLock};
 mod redlock;
