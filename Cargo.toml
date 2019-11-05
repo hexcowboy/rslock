@@ -12,7 +12,8 @@ repository = "https://github.com/badboy/redlock-rs"
 
 license = "BSD-3-Clause"
 readme = "README.md"
+edition = "2018"
 
 [dependencies]
-redis = "0.5.1"
-rand = "0.3.14"
+redis = "0.13.0"
+rand = "0.7.2"
