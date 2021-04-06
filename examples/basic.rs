@@ -53,7 +53,7 @@ pub fn main() {
                 }
                 let val: i32 = redis::cmd("GET").arg(incr_key).query(&mut con).unwrap_or(0);
 
-                let n = rng.gen_range(0, 5);
+                let n = rng.gen_range(0..5);
                 thread::sleep(Duration::from_millis(n));
 
                 redis::cmd("SET")

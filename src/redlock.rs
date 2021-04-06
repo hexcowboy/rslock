@@ -149,7 +149,7 @@ impl RedLock {
                 }
             }
 
-            let n = rng.gen_range(0, self.retry_delay);
+            let n = rng.gen_range(0..self.retry_delay);
             sleep(Duration::from_millis(u64::from(n)));
         }
         None
