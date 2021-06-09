@@ -55,6 +55,11 @@ cargo run --release
 
 If you find bugs or want to help otherwise, please [open an issue](https://github.com/badboy/redlock-rs/issues).
 
+## Maintainer
+
+* From 2014 to June 2021 this crate was owned and maintained by [@badboy](https://github.com/badboy/)
+* From June 2021 on this crate is maintained by [@aig787](https://github.com/aig787)
+
 ## License
 
 BSD. See [LICENSE](LICENSE).  
