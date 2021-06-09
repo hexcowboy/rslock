@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release level or valid semver'
+        required: true
+        default: 'release'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          # Fetches entire history, so we can analyze commits since last tag
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v1
+      - uses: actions-rs/toolchain@v1.0.7
+        with:
+          toolchain: stable
+          override: true
+      - uses: fusion-engineering/setup-git-credentials@v2
+        with:
+          credentials: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-release
+        run: cargo install cargo-release
+      - name: Release
+        run: cargo release -v --dry-run --no-confirm --token ${{ secrets.CRATES_IO_TOKEN }} ${{ github.event.inputs.release }}

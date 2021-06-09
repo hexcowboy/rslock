@@ -1,7 +1,7 @@
 # redlock-rs - Distributed locks with Redis
 
-[![Build Status](https://travis-ci.org/badboy/redlock-rs.svg?branch=master)](https://travis-ci.org/badboy/redlock-rs)
-[![crates.io](http://meritbadge.herokuapp.com/redlock)](https://crates.io/crates/redlock)
+![GitHub Workflow Status](https://img.shields.io/github/workflow/status/badboy/redlock-rs/CI)
+![Crates.io](https://img.shields.io/crates/v/redlock)
 
 This is an implementation of Redlock, the [distributed locking mechanism][distlock] built on top of Redis.
 It is more or less a port of the [Ruby version][redlock.rb].

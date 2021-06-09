@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis0:
+        image: redis
+        ports:
+          - 6377:6379
+      redis1:
+        image: redis
+        ports:
+          - 6378:6379
+      redis2:
+        image: redis
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+      - uses: actions-rs/toolchain@v1.0.7
+        with:
+          toolchain: stable
+          override: true
+      - uses: fusion-engineering/setup-git-credentials@v2
+        with:
+          credentials: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run tests
+        run: ADDRESSES="redis://localhost:6377,redis://localhost:6378,redis://localhost:6379" cargo test
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: mbrobbel/rustfmt-check@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+      - uses: actions-rs/toolchain@v1.0.7
+        with:
+          toolchain: nightly
+          components: clippy
+          override: true
+      - uses: fusion-engineering/setup-git-credentials@v2
+        with:
+          credentials: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --all-targets --all-features
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v1
+      - uses: fusion-engineering/setup-git-credentials@v2
+        with:
+          credentials: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
