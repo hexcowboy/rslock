@@ -172,6 +172,7 @@ impl RedLock {
     ///
     /// Returns a `RedLockGuard` instance which is a RAII wrapper for \
     /// the old `Lock` object
+    #[cfg(feature = "async")]
     pub async fn acquire_async(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
         let lock;
         loop {
@@ -183,21 +184,18 @@ impl RedLock {
                 None => tokio::task::yield_now().await,
             }
         }
-        RedLockGuard { lock: lock }
+        RedLockGuard { lock }
     }
 
     pub fn acquire(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
         let lock;
         loop {
-            match self.lock(resource, ttl) {
-                Some(l) => {
-                    lock = l;
-                    break;
-                }
-                None => {}
+            if let Some(l) = self.lock(resource, ttl) {
+                lock = l;
+                break;
             }
         }
-        RedLockGuard { lock: lock }
+        RedLockGuard { lock }
     }
 
     fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {

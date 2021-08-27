@@ -24,7 +24,6 @@ jobs:
           - 6379:6379
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1.0.7
         with:
           toolchain: stable
@@ -32,8 +31,11 @@ jobs:
       - uses: fusion-engineering/setup-git-credentials@v2
         with:
           credentials: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v1
       - name: Run tests
-        run: ADDRESSES="redis://localhost:6377,redis://localhost:6378,redis://localhost:6379" cargo test
+        run: cargo test
+        env:
+          ADDRESSES: redis://localhost:6377,redis://localhost:6378,redis://localhost:6379
   format:
     runs-on: ubuntu-latest
     steps:
@@ -45,7 +47,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1.0.7
         with:
           toolchain: nightly
@@ -54,18 +55,8 @@ jobs:
       - uses: fusion-engineering/setup-git-credentials@v2
         with:
           credentials: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/clippy-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           args: --all-targets --all-features
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v1
-      - uses: fusion-engineering/setup-git-credentials@v2
-        with:
-          credentials: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions-rs/audit-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}

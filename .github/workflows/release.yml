@@ -7,6 +7,13 @@ on:
         description: 'Release level or valid semver'
         required: true
         default: 'release'
+      execute:
+        description: 'Whether to actually execute release'
+        required: true
+        default: 'false'
+      token:
+        description: 'Crates.io token'
+        required: false
 
 jobs:
   release:
@@ -16,7 +23,6 @@ jobs:
         with:
           # Fetches entire history, so we can analyze commits since last tag
           fetch-depth: 0
-      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1.0.7
         with:
           toolchain: stable
@@ -24,7 +30,12 @@ jobs:
       - uses: fusion-engineering/setup-git-credentials@v2
         with:
           credentials: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v1
       - name: Install cargo-release
         run: cargo install cargo-release
       - name: Release
-        run: cargo release -v --dry-run --no-confirm --token ${{ secrets.CRATES_IO_TOKEN }} ${{ github.event.inputs.release }}
+        if: ${{ github.event.inputs.execute  == 'true' }}
+        run: cargo release -v -x --no-confirm --token ${{ github.event.inputs.token }} ${{ github.event.inputs.release }}
+      - name: Release (Dry Run)
+        if: ${{ github.event.inputs.execute  != 'true' }}
+        run: cargo release -v ${{ github.event.inputs.release }}
