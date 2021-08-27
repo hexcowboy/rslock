@@ -17,6 +17,7 @@ edition = "2018"
 [dependencies]
 redis = "0.21.0"
 rand = "0.8.3"
+tokio = {version = "1.7.1", features = ["rt"]}
 
 [dev-dependencies]
 testcontainers = { git = "ssh://git@github.com/testcontainers/testcontainers-rs", branch = "dev"}
