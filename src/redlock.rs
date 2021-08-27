@@ -176,26 +176,28 @@ impl RedLock {
         let lock;
         loop {
             match self.lock(resource, ttl) {
-                Some(l) => { lock = l; break; }
-                None => { tokio::task::yield_now().await }
+                Some(l) => {
+                    lock = l;
+                    break;
+                }
+                None => tokio::task::yield_now().await,
             }
         }
-        RedLockGuard {
-            lock: lock
-        }
+        RedLockGuard { lock: lock }
     }
 
     pub fn acquire(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
         let lock;
         loop {
             match self.lock(resource, ttl) {
-                Some(l) => { lock = l; break; }
-                None => {  }
+                Some(l) => {
+                    lock = l;
+                    break;
+                }
+                None => {}
             }
         }
-        RedLockGuard {
-            lock: lock
-        }
+        RedLockGuard { lock: lock }
     }
 
     fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
@@ -394,26 +396,26 @@ mod tests {
         Ok(())
     }
 
-	#[test]
+    #[test]
     fn test_redlock_lock_unlock_raii() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let rl2 = RedLock::new(ADDRESSES.clone());
 
         let key = rl.get_unique_lock_id()?;
-		{
-			let lock_guard = rl.acquire(&key, 1000);
-			let lock = &lock_guard.lock;
-			assert!(
-				lock.validity_time > 900,
-				"validity time: {}",
-				lock.validity_time
-			);
+        {
+            let lock_guard = rl.acquire(&key, 1000);
+            let lock = &lock_guard.lock;
+            assert!(
+                lock.validity_time > 900,
+                "validity time: {}",
+                lock.validity_time
+            );
 
-			if let Some(_l) = rl2.lock(&key, 1000) {
-				panic!("Lock acquired, even though it should be locked")
-			}
-		}
+            if let Some(_l) = rl2.lock(&key, 1000) {
+                panic!("Lock acquired, even though it should be locked")
+            }
+        }
 
         match rl2.lock(&key, 1000) {
             Some(l) => assert!(l.validity_time > 900),
