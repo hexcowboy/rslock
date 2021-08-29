@@ -25,6 +25,6 @@ async = ["tokio"]
 tls = ["redis/tls"]
 
 [dev-dependencies]
-testcontainers = { git = "ssh://git@github.com/testcontainers/testcontainers-rs", branch = "dev" }
+testcontainers = "0.12.0"
 once_cell = "1.7.2"
 anyhow = "1.0.40"

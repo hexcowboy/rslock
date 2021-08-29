@@ -226,31 +226,24 @@ impl RedLock {
 mod tests {
     use anyhow::Result;
     use once_cell::sync::Lazy;
-    use once_cell::unsync::Lazy as UnsyncLazy;
     use testcontainers::clients::Cli;
     use testcontainers::images::redis::Redis;
-    use testcontainers::Container;
+    use testcontainers::{Container, Docker};
 
     use super::*;
 
     static DOCKER: Lazy<Cli> = Lazy::new(Cli::default);
-    // Actual containers are not thread-safe, but they don't have to be
-    thread_local! {
-        static CONTAINERS: UnsyncLazy<Vec<Container<'static, Redis>>> = UnsyncLazy::new(|| {
-            (0..3)
-                .map(|_| DOCKER.run(Redis::default().with_tag("6-alpine")))
-                .collect()
-        })
-    }
-
+    static CONTAINERS: Lazy<Vec<Container<Cli, Redis>>> = Lazy::new(|| {
+        (0..3)
+            .map(|_| DOCKER.run(Redis::default().with_tag("6-alpine")))
+            .collect()
+    });
     static ADDRESSES: Lazy<Vec<String>> = Lazy::new(|| match std::env::var("ADDRESSES") {
         Ok(addresses) => addresses.split(',').map(String::from).collect(),
-        Err(_) => CONTAINERS.with(|containers| {
-            containers
-                .iter()
-                .map(|c| format!("redis://localhost:{}", c.get_host_port(6379)))
-                .collect()
-        }),
+        Err(_) => CONTAINERS
+            .iter()
+            .map(|c| format!("redis://localhost:{}", c.get_host_port(6379).unwrap()))
+            .collect(),
     });
 
     #[test]
