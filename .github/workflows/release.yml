@@ -33,6 +33,12 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - name: Install cargo-release
         run: cargo install cargo-release
+      - name: Setup git config
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+      # WARNING: Clean up the job after using release action - due to a limitation in github actions the token cannot
+      #          be masked when coming from a workflow_dispatch input. It will be logged in plaintext.
       - name: Release
         if: ${{ github.event.inputs.execute  == 'true' }}
         run: cargo release -v -x --no-confirm --token ${{ github.event.inputs.token }} ${{ github.event.inputs.release }}
