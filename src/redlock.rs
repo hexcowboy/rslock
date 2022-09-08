@@ -400,7 +400,8 @@ mod tests {
             if let Ok(_l) = rl2.lock(&key, 1000).await {
                 panic!("Lock acquired, even though it should be locked")
             }
-        }.await;
+        }
+        .await;
 
         match rl2.lock(&key, 1000).await {
             Ok(l) => assert!(l.validity_time > 900),
