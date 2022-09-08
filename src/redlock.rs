@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::{self, Read};
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use futures::future::join_all;
 use rand::{thread_rng, Rng};
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisResult, Value};
@@ -15,6 +15,13 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
                               else
                                 return 0
                               end";
+
+#[derive(Debug)]
+pub enum RedLockError {
+    Io(io::Error),
+    Redis(redis::RedisError),
+    Unavailable,
+}
 
 /// The lock manager.
 ///
@@ -47,7 +54,7 @@ pub struct RedLockGuard<'a> {
 
 impl Drop for RedLockGuard<'_> {
     fn drop(&mut self) {
-        self.lock.lock_manager.unlock(&self.lock);
+        futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
     }
 }
 
@@ -95,14 +102,14 @@ impl RedLock {
         self.retry_delay = delay;
     }
 
-    fn lock_instance(
+    async fn lock_instance(
         &self,
         client: &redis::Client,
         resource: &[u8],
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let mut con = match client.get_connection() {
+        let mut con = match client.get_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -112,99 +119,22 @@ impl RedLock {
             .arg("nx")
             .arg("px")
             .arg(ttl)
-            .query(&mut con);
+            .query_async(&mut con)
+            .await;
+
         match result {
             Ok(Okay) => true,
             Ok(_) | Err(_) => false,
         }
     }
 
-    /// Acquire the lock for the given resource and the requested TTL.
-    ///
-    /// If it succeeds, a `Lock` instance is returned,
-    /// including the value and the validity time
-    ///
-    /// If it fails. `None` is returned.
-    /// A user should retry after a short wait time.
-    pub fn lock(&self, resource: &[u8], ttl: usize) -> Option<Lock> {
-        let val = self.get_unique_lock_id().unwrap();
-
-        let mut rng = thread_rng();
-
-        for _ in 0..self.retry_count {
-            let mut n = 0;
-            let start_time = Instant::now();
-            for client in &self.servers {
-                if self.lock_instance(client, resource, &val, ttl) {
-                    n += 1;
-                }
-            }
-
-            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
-            let elapsed = start_time.elapsed();
-            let validity_time = ttl
-                - drift
-                - elapsed.as_secs() as usize * 1000
-                - elapsed.subsec_nanos() as usize / 1_000_000;
-
-            if n >= self.quorum && validity_time > 0 {
-                return Some(Lock {
-                    lock_manager: self,
-                    resource: resource.to_vec(),
-                    val,
-                    validity_time,
-                });
-            } else {
-                for client in &self.servers {
-                    self.unlock_instance(client, resource, &val);
-                }
-            }
-
-            let n = rng.gen_range(0..self.retry_delay);
-            sleep(Duration::from_millis(u64::from(n)));
-        }
-        None
-    }
-
-    /// Acquire the lock for the given resource and the requested TTL. \
-    /// Will wait and yield current task (tokio runtime) until the lock \
-    /// is acquired
-    ///
-    /// Returns a `RedLockGuard` instance which is a RAII wrapper for \
-    /// the old `Lock` object
-    #[cfg(feature = "async")]
-    pub async fn acquire_async(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
-        let lock;
-        loop {
-            match self.lock(resource, ttl) {
-                Some(l) => {
-                    lock = l;
-                    break;
-                }
-                None => tokio::task::yield_now().await,
-            }
-        }
-        RedLockGuard { lock }
-    }
-
-    pub fn acquire(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
-        let lock;
-        loop {
-            if let Some(l) = self.lock(resource, ttl) {
-                lock = l;
-                break;
-            }
-        }
-        RedLockGuard { lock }
-    }
-
-    fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = match client.get_connection() {
+    async fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
+        let mut con = match client.get_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
         };
         let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke(&mut con);
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(&mut con).await;
         match result {
             Ok(val) => val == 1,
             Err(_) => false,
@@ -215,9 +145,73 @@ impl RedLock {
     ///
     /// Unlock is best effort. It will simply try to contact all instances
     /// and remove the key.
-    pub fn unlock(&self, lock: &Lock) {
-        for client in &self.servers {
-            self.unlock_instance(client, &lock.resource, &lock.val);
+    pub async fn unlock(&self, lock: &Lock<'_>) {
+        join_all(
+            self.servers
+                .iter()
+                .map(|client| self.unlock_instance(client, &lock.resource, &lock.val)),
+        )
+        .await;
+    }
+
+    /// Acquire the lock for the given resource and the requested TTL.
+    ///
+    /// If it succeeds, a `Lock` instance is returned,
+    /// including the value and the validity time
+    ///
+    /// If it fails. `None` is returned.
+    /// A user should retry after a short wait time.
+    pub async fn lock(&self, resource: &[u8], ttl: usize) -> Result<Lock<'_>, RedLockError> {
+        let val = self.get_unique_lock_id().unwrap();
+
+        let mut rng = thread_rng();
+
+        for _ in 0..self.retry_count {
+            let start_time = Instant::now();
+            let n = join_all(
+                self.servers
+                    .iter()
+                    .map(|client| self.lock_instance(client, resource, &val, ttl)),
+            )
+            .await
+            .into_iter()
+            .fold(0, |count, locked| if locked { count + 1 } else { count });
+
+            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
+            let elapsed = start_time.elapsed();
+            let validity_time = ttl
+                - drift
+                - elapsed.as_secs() as usize * 1000
+                - elapsed.subsec_nanos() as usize / 1_000_000;
+
+            if n >= self.quorum && validity_time > 0 {
+                return Ok(Lock {
+                    lock_manager: self,
+                    resource: resource.to_vec(),
+                    val,
+                    validity_time,
+                });
+            } else {
+                join_all(
+                    self.servers
+                        .iter()
+                        .map(|client| self.unlock_instance(client, resource, &val)),
+                )
+                .await;
+            }
+
+            let n = rng.gen_range(0..self.retry_delay);
+            tokio::time::sleep(Duration::from_millis(u64::from(n))).await
+        }
+
+        Err(RedLockError::Unavailable)
+    }
+
+    pub async fn acquire(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
+        loop {
+            if let Ok(lock) = self.lock(resource, ttl).await {
+                return RedLockGuard { lock };
+            }
         }
     }
 }
@@ -274,19 +268,19 @@ mod tests {
         assert_eq!(2, rl.quorum);
     }
 
-    #[test]
-    fn test_redlock_direct_unlock_fails() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_direct_unlock_fails() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        assert!(!rl.unlock_instance(&rl.servers[0], &key, &val));
+        assert!(!rl.unlock_instance(&rl.servers[0], &key, &val).await);
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_direct_unlock_succeeds() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_direct_unlock_succeeds() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let key = rl.get_unique_lock_id()?;
@@ -295,12 +289,12 @@ mod tests {
         let mut con = rl.servers[0].get_connection()?;
         redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
 
-        assert!(rl.unlock_instance(&rl.servers[0], &key, &val));
+        assert!(rl.unlock_instance(&rl.servers[0], &key, &val).await);
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_direct_lock_succeeds() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_direct_lock_succeeds() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let key = rl.get_unique_lock_id()?;
@@ -309,12 +303,12 @@ mod tests {
         let mut con = rl.servers[0].get_connection()?;
 
         redis::cmd("DEL").arg(&*key).execute(&mut con);
-        assert!(rl.lock_instance(&rl.servers[0], &*key, &*val, 1000));
+        assert!(rl.lock_instance(&rl.servers[0], &*key, &*val, 1000).await);
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_unlock() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_unlock() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let key = rl.get_unique_lock_id()?;
@@ -333,18 +327,18 @@ mod tests {
             val,
             validity_time: 0,
         };
-        rl.unlock(&lock);
+        rl.unlock(&lock).await;
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_lock() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_lock() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
 
         let key = rl.get_unique_lock_id()?;
-        match rl.lock(&key, 1000) {
-            Some(lock) => {
+        match rl.lock(&key, 1000).await {
+            Ok(lock) => {
                 assert_eq!(key, lock.resource);
                 assert_eq!(20, lock.val.len());
                 assert!(lock.validity_time > 900);
@@ -354,48 +348,48 @@ mod tests {
                     lock.validity_time
                 );
             }
-            None => panic!("Lock failed"),
+            Err(_) => panic!("Lock failed"),
         }
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_lock_unlock() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_lock_unlock() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let rl2 = RedLock::new(ADDRESSES.clone());
 
         let key = rl.get_unique_lock_id()?;
 
-        let lock = rl.lock(&key, 1000).unwrap();
+        let lock = rl.lock(&key, 1000).await.unwrap();
         assert!(
             lock.validity_time > 900,
             "validity time: {}",
             lock.validity_time
         );
 
-        if let Some(_l) = rl2.lock(&key, 1000) {
+        if let Ok(_l) = rl2.lock(&key, 1000).await {
             panic!("Lock acquired, even though it should be locked")
         }
 
-        rl.unlock(&lock);
+        rl.unlock(&lock).await;
 
-        match rl2.lock(&key, 1000) {
-            Some(l) => assert!(l.validity_time > 900),
-            None => panic!("Lock couldn't be acquired"),
+        match rl2.lock(&key, 1000).await {
+            Ok(l) => assert!(l.validity_time > 900),
+            Err(_) => panic!("Lock couldn't be acquired"),
         }
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_lock_unlock_raii() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_lock_unlock_raii() -> Result<()> {
         println!("{}", ADDRESSES.join(","));
         let rl = RedLock::new(ADDRESSES.clone());
         let rl2 = RedLock::new(ADDRESSES.clone());
 
         let key = rl.get_unique_lock_id()?;
-        {
-            let lock_guard = rl.acquire(&key, 1000);
+        async {
+            let lock_guard = rl.acquire(&key, 1000).await;
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 900,
@@ -403,14 +397,14 @@ mod tests {
                 lock.validity_time
             );
 
-            if let Some(_l) = rl2.lock(&key, 1000) {
+            if let Ok(_l) = rl2.lock(&key, 1000).await {
                 panic!("Lock acquired, even though it should be locked")
             }
-        }
+        }.await;
 
-        match rl2.lock(&key, 1000) {
-            Some(l) => assert!(l.validity_time > 900),
-            None => panic!("Lock couldn't be acquired"),
+        match rl2.lock(&key, 1000).await {
+            Ok(l) => assert!(l.validity_time > 900),
+            Err(_) => panic!("Lock couldn't be acquired"),
         }
         Ok(())
     }
