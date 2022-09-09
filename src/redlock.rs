@@ -164,8 +164,6 @@ impl RedLock {
     pub async fn lock(&self, resource: &[u8], ttl: usize) -> Result<Lock<'_>, RedLockError> {
         let val = self.get_unique_lock_id().unwrap();
 
-        let mut rng = thread_rng();
-
         for _ in 0..self.retry_count {
             let start_time = Instant::now();
             let n = join_all(
@@ -200,7 +198,7 @@ impl RedLock {
                 .await;
             }
 
-            let n = rng.gen_range(0..self.retry_delay);
+            let n = thread_rng().gen_range(0..self.retry_delay);
             tokio::time::sleep(Duration::from_millis(u64::from(n))).await
         }
 
