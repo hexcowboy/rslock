@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
+use futures::Future;
 use rand::{thread_rng, Rng};
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisResult, Value};
@@ -15,6 +16,17 @@ const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
                               else
                                 return 0
                               end";
+const EXTEND_SCRIPT: &str = r#"
+if redis.call("get", KEYS[1]) ~= ARGV[1] then
+  return 0
+else
+  if redis.call("set", KEYS[1], ARGV[1], "PX", ARGV[2]) ~= nil then
+    return 1
+  else
+    return 0
+  end
+end
+"#;
 
 #[derive(Debug)]
 pub enum RedLockError {
@@ -106,7 +118,7 @@ impl RedLock {
         &self,
         client: &redis::Client,
         resource: &[u8],
-        val: &[u8],
+        val: Vec<u8>,
         ttl: usize,
     ) -> bool {
         let mut con = match client.get_async_connection().await {
@@ -128,6 +140,30 @@ impl RedLock {
         }
     }
 
+    async fn extend_lock_instance(
+        &self,
+        client: &redis::Client,
+        resource: &[u8],
+        val: &[u8],
+        duration: usize,
+    ) -> bool {
+        let mut con = match client.get_async_connection().await {
+            Err(_) => return false,
+            Ok(val) => val,
+        };
+        let script = redis::Script::new(EXTEND_SCRIPT);
+        let result: RedisResult<i32> = script
+            .key(resource)
+            .arg(val)
+            .arg(duration)
+            .invoke_async(&mut con)
+            .await;
+        match result {
+            Ok(val) => val == 1,
+            Err(_) => false,
+        }
+    }
+
     async fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
         let mut con = match client.get_async_connection().await {
             Err(_) => return false,
@@ -139,6 +175,56 @@ impl RedLock {
             Ok(val) => val == 1,
             Err(_) => false,
         }
+    }
+
+    // Can be used for creating or extending a lock
+    async fn lock_with_duration<'a: 'b, 'b, T, Fut>(
+        &'a self,
+        resource: &[u8],
+        value: &[u8],
+        duration: usize,
+        lock: T,
+    ) -> Result<Lock<'_>, RedLockError>
+    where
+        T: Fn(&'b Client) -> Fut + 'a,
+        Fut: Future<Output = bool> + 'b,
+    {
+        for _ in 0..self.retry_count {
+            let start_time = Instant::now();
+            let n = join_all(self.servers.iter().map(&lock))
+                .await
+                .into_iter()
+                .fold(0, |count, locked| if locked { count + 1 } else { count });
+
+            let drift = (duration as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
+            let elapsed = start_time.elapsed();
+            let validity_time = duration
+                - drift
+                - elapsed.as_secs() as usize * 1000
+                - elapsed.subsec_nanos() as usize / 1_000_000;
+
+            dbg!(n);
+            if n >= self.quorum && validity_time > 0 {
+                return Ok(Lock {
+                    lock_manager: self,
+                    resource: resource.to_vec(),
+                    val: value.to_vec(),
+                    validity_time,
+                });
+            } else {
+                join_all(
+                    self.servers
+                        .iter()
+                        .map(|client| self.unlock_instance(client, resource, &value)),
+                )
+                .await;
+            }
+
+            let n = thread_rng().gen_range(0..self.retry_delay);
+            tokio::time::sleep(Duration::from_millis(u64::from(n))).await
+        }
+
+        Err(RedLockError::Unavailable)
     }
 
     /// Unlock the given lock.
@@ -161,56 +247,37 @@ impl RedLock {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock(&self, resource: &[u8], ttl: usize) -> Result<Lock<'_>, RedLockError> {
+    pub async fn lock<'a>(
+        &'a self,
+        resource: &'a [u8],
+        ttl: usize,
+    ) -> Result<Lock<'_>, RedLockError> {
         let val = self.get_unique_lock_id().unwrap();
 
-        for _ in 0..self.retry_count {
-            let start_time = Instant::now();
-            let n = join_all(
-                self.servers
-                    .iter()
-                    .map(|client| self.lock_instance(client, resource, &val, ttl)),
-            )
-            .await
-            .into_iter()
-            .fold(0, |count, locked| if locked { count + 1 } else { count });
-
-            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
-            let elapsed = start_time.elapsed();
-            let validity_time = ttl
-                - drift
-                - elapsed.as_secs() as usize * 1000
-                - elapsed.subsec_nanos() as usize / 1_000_000;
-
-            if n >= self.quorum && validity_time > 0 {
-                return Ok(Lock {
-                    lock_manager: self,
-                    resource: resource.to_vec(),
-                    val,
-                    validity_time,
-                });
-            } else {
-                join_all(
-                    self.servers
-                        .iter()
-                        .map(|client| self.unlock_instance(client, resource, &val)),
-                )
-                .await;
-            }
-
-            let n = thread_rng().gen_range(0..self.retry_delay);
-            tokio::time::sleep(Duration::from_millis(u64::from(n))).await
-        }
-
-        Err(RedLockError::Unavailable)
+        self.lock_with_duration(resource, &val.clone(), ttl, move |client| {
+            self.lock_instance(client, resource, val.clone(), ttl)
+        })
+        .await
     }
 
-    pub async fn acquire(&self, resource: &[u8], ttl: usize) -> RedLockGuard<'_> {
+    pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> RedLockGuard<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
                 return RedLockGuard { lock };
             }
         }
+    }
+
+    /// Extend the given lock by given time in milliseconds
+    pub async fn extend<'a>(
+        &'a self,
+        lock: &'a Lock<'_>,
+        duration: usize,
+    ) -> Result<Lock<'_>, RedLockError> {
+        self.lock_with_duration(&lock.resource, &lock.val, duration, move |client| {
+            self.extend_lock_instance(client, &lock.resource, &lock.val, duration)
+        })
+        .await
     }
 }
 
@@ -301,7 +368,10 @@ mod tests {
         let mut con = rl.servers[0].get_connection()?;
 
         redis::cmd("DEL").arg(&*key).execute(&mut con);
-        assert!(rl.lock_instance(&rl.servers[0], &*key, &*val, 1000).await);
+        assert!(
+            rl.lock_instance(&rl.servers[0], &*key, val.clone(), 1000)
+                .await
+        );
         Ok(())
     }
 
@@ -405,6 +475,75 @@ mod tests {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redlock_extend_lock() -> Result<()> {
+        let rl1 = RedLock::new(ADDRESSES.clone());
+        let rl2 = RedLock::new(ADDRESSES.clone());
+
+        let key = rl1.get_unique_lock_id()?;
+
+        async {
+            let lock1 = rl1.acquire(&key, 1000).await;
+
+            // Wait half a second before locking again
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            rl1.extend(&lock1.lock, 1000).await.unwrap();
+
+            // Wait another half a second to see if lock2 can unlock
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Assert lock2 can't access after extended lock
+            match rl2.lock(&key, 1000).await {
+                Ok(_) => panic!("Expected an error when extending the lock but didn't receive one"),
+                Err(e) => match e {
+                    RedLockError::Unavailable => (),
+                    _ => panic!("Unexpected error when extending lock"),
+                },
+            }
+        }
+        .await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_redlock_extend_lock_releases() -> Result<()> {
+        let rl1 = RedLock::new(ADDRESSES.clone());
+        let rl2 = RedLock::new(ADDRESSES.clone());
+
+        let key = rl1.get_unique_lock_id()?;
+
+        async {
+            // Create 500ms lock and immediately extend 500ms
+            let lock1 = rl1.acquire(&key, 500).await;
+            rl1.extend(&lock1.lock, 500).await.unwrap();
+
+            // Wait one second for the lock to expire
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+            // Assert rl2 can lock with the key now
+            match rl2.lock(&key, 1000).await {
+                Err(_) => {
+                    panic!("Unexpected error when trying to claim free lock after extend expired")
+                }
+                _ => (),
+            }
+
+            // Also assert rl1 can't reuse lock1
+            match rl1.extend(&lock1.lock, 1000).await {
+                Ok(_) => panic!("Did not expect OK() when re-extending rl1"),
+                Err(e) => match e {
+                    RedLockError::Unavailable => (),
+                    _ => panic!("Expected RedLockError::Unavailable when re-extending rl1"),
+                },
+            }
+        }
+        .await;
+
         Ok(())
     }
 }
