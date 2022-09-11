@@ -215,7 +215,7 @@ impl RedLock {
                 join_all(
                     self.servers
                         .iter()
-                        .map(|client| self.unlock_instance(client, resource, &value)),
+                        .map(|client| self.unlock_instance(client, resource, value)),
                 )
                 .await;
             }
