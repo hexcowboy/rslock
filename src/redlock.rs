@@ -145,7 +145,7 @@ impl RedLock {
         client: &redis::Client,
         resource: &[u8],
         val: &[u8],
-        duration: usize,
+        ttl: usize,
     ) -> bool {
         let mut con = match client.get_async_connection().await {
             Err(_) => return false,
@@ -155,7 +155,7 @@ impl RedLock {
         let result: RedisResult<i32> = script
             .key(resource)
             .arg(val)
-            .arg(duration)
+            .arg(ttl)
             .invoke_async(&mut con)
             .await;
         match result {
@@ -178,11 +178,11 @@ impl RedLock {
     }
 
     // Can be used for creating or extending a lock
-    async fn lock_with_duration<'a: 'b, 'b, T, Fut>(
+    async fn exec_or_retry<'a: 'b, 'b, T, Fut>(
         &'a self,
         resource: &[u8],
         value: &[u8],
-        duration: usize,
+        ttl: usize,
         lock: T,
     ) -> Result<Lock<'_>, RedLockError>
     where
@@ -196,14 +196,13 @@ impl RedLock {
                 .into_iter()
                 .fold(0, |count, locked| if locked { count + 1 } else { count });
 
-            let drift = (duration as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
+            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
-            let validity_time = duration
+            let validity_time = ttl
                 - drift
                 - elapsed.as_secs() as usize * 1000
                 - elapsed.subsec_nanos() as usize / 1_000_000;
 
-            dbg!(n);
             if n >= self.quorum && validity_time > 0 {
                 return Ok(Lock {
                     lock_manager: self,
@@ -254,7 +253,7 @@ impl RedLock {
     ) -> Result<Lock<'_>, RedLockError> {
         let val = self.get_unique_lock_id().unwrap();
 
-        self.lock_with_duration(resource, &val.clone(), ttl, move |client| {
+        self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
             self.lock_instance(client, resource, val.clone(), ttl)
         })
         .await
@@ -272,10 +271,10 @@ impl RedLock {
     pub async fn extend<'a>(
         &'a self,
         lock: &'a Lock<'_>,
-        duration: usize,
+        ttl: usize,
     ) -> Result<Lock<'_>, RedLockError> {
-        self.lock_with_duration(&lock.resource, &lock.val, duration, move |client| {
-            self.extend_lock_instance(client, &lock.resource, &lock.val, duration)
+        self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
+            self.extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
         .await
     }
