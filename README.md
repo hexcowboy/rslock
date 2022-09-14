@@ -19,21 +19,34 @@ cargo build --release
 use redlock::RedLock;
 
 #[tokio::main]
-fn main() {
-  let rl = RedLock::new(vec!["redis://127.0.0.1:6380/", "redis://127.0.0.1:6381/", "redis://127.0.0.1:6382/"]);
+async fn main() {
+    let rl = RedLock::new(vec![
+        "redis://127.0.0.1:6380/",
+        "redis://127.0.0.1:6381/",
+        "redis://127.0.0.1:6382/",
+    ]);
 
-  let lock;
-  loop {
-    match rl.lock("mutex".as_bytes(), 1000).await {
-      Ok(l) => { lock = l; break }
-      Err(_) => ()
+    let lock;
+    loop {
+        // Create the lock
+        match rl.lock("mutex".as_bytes(), 1000).await {
+            Ok(l) => {
+                lock = l;
+                break;
+            }
+            Err(_) => (),
+        }
     }
-  }
 
-  // Critical section
-  rl.unlock(&lock).await;
+    // Extend the lock
+    match rl.extend(&lock, 1000).await {
+        Ok(_) => println!("lock extended!"),
+        Err(_) => (),
+    }
+
+    // Unlock the lock
+    rl.unlock(&lock).await;
 }
-
 ```
 
 ## Tests
