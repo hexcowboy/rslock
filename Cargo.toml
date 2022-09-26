@@ -1,6 +1,6 @@
 [package]
 
-name = "redlock-async"
+name = "rslock"
 version = "0.0.4"
 authors = [
   "Jan-Erik Rediger <badboy@archlinux.us>",
