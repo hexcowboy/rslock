@@ -11,11 +11,13 @@ use redis::{Client, IntoConnectionInfo, RedisResult, Value};
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY: u32 = 200;
 const CLOCK_DRIFT_FACTOR: f32 = 0.01;
-const UNLOCK_SCRIPT: &str = r"if redis.call('get',KEYS[1]) == ARGV[1] then
-                                return redis.call('del',KEYS[1])
-                              else
-                                return 0
-                              end";
+const UNLOCK_SCRIPT: &str = r#"
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+else
+  return 0
+end
+"#;
 const EXTEND_SCRIPT: &str = r#"
 if redis.call("get", KEYS[1]) ~= ARGV[1] then
   return 0
@@ -128,8 +130,8 @@ impl RedLock {
         let result: RedisResult<Value> = redis::cmd("SET")
             .arg(resource)
             .arg(val)
-            .arg("nx")
-            .arg("px")
+            .arg("NX")
+            .arg("PX")
             .arg(ttl)
             .query_async(&mut con)
             .await;
@@ -286,33 +288,40 @@ mod tests {
     use once_cell::sync::Lazy;
     use testcontainers::clients::Cli;
     use testcontainers::images::redis::Redis;
-    use testcontainers::{Container, Docker};
+    use testcontainers::{Container, RunnableImage};
 
     use super::*;
 
-    static DOCKER: Lazy<Cli> = Lazy::new(Cli::default);
-    static CONTAINERS: Lazy<Vec<Container<Cli, Redis>>> = Lazy::new(|| {
-        (0..3)
-            .map(|_| DOCKER.run(Redis::default().with_tag("6-alpine")))
-            .collect()
-    });
-    static ADDRESSES: Lazy<Vec<String>> = Lazy::new(|| match std::env::var("ADDRESSES") {
-        Ok(addresses) => addresses.split(',').map(String::from).collect(),
-        Err(_) => CONTAINERS
-            .iter()
-            .map(|c| format!("redis://localhost:{}", c.get_host_port(6379).unwrap()))
-            .collect(),
-    });
+    type Containers = Vec<Container<'static, Redis>>;
 
-    #[test]
-    fn test_redlock_get_unique_id() -> Result<()> {
+    static DOCKER: Lazy<Cli> = Lazy::new(Cli::docker);
+
+    pub fn create_clients() -> (Containers, Vec<String>) {
+        let containers: Containers = (1..=3)
+            .map(|_| {
+                let image = RunnableImage::from(Redis::default()).with_tag("7-alpine");
+                DOCKER.run(image)
+            })
+            .collect();
+
+        let addresses = containers
+            .iter()
+            .map(|node| format!("redis://localhost:{}", node.get_host_port_ipv4(6379)))
+            .collect();
+
+        (containers, addresses)
+    }
+
+    #[tokio::test]
+    async fn test_redlock_get_unique_id() -> Result<()> {
         let rl = RedLock::new(Vec::<String>::new());
         assert_eq!(rl.get_unique_lock_id()?.len(), 20);
+
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_get_unique_id_uniqueness() -> Result<()> {
+    #[tokio::test]
+    async fn test_redlock_get_unique_id_uniqueness() -> Result<()> {
         let rl = RedLock::new(Vec::<String>::new());
 
         let id1 = rl.get_unique_lock_id()?;
@@ -321,32 +330,38 @@ mod tests {
         assert_eq!(20, id1.len());
         assert_eq!(20, id2.len());
         assert_ne!(id1, id2);
+
         Ok(())
     }
 
-    #[test]
-    fn test_redlock_valid_instance() {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+    #[tokio::test]
+    async fn test_redlock_valid_instance() {
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
+
         assert_eq!(3, rl.servers.len());
         assert_eq!(2, rl.quorum);
     }
 
     #[tokio::test]
     async fn test_redlock_direct_unlock_fails() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
         assert!(!rl.unlock_instance(&rl.servers[0], &key, &val).await);
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_direct_unlock_succeeds() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -354,13 +369,15 @@ mod tests {
         redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
 
         assert!(rl.unlock_instance(&rl.servers[0], &key, &val).await);
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_direct_lock_succeeds() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -371,13 +388,15 @@ mod tests {
             rl.lock_instance(&rl.servers[0], &*key, val.clone(), 1000)
                 .await
         );
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_unlock() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -394,14 +413,17 @@ mod tests {
             val,
             validity_time: 0,
         };
+
         rl.unlock(&lock).await;
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_lock() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
         match rl.lock(&key, 1000).await {
@@ -415,16 +437,18 @@ mod tests {
                     lock.validity_time
                 );
             }
-            Err(_) => panic!("Lock failed"),
+            Err(e) => panic!("{:?}", e),
         }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_lock_unlock() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
-        let rl2 = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl = RedLock::new(addresses.clone());
+        let rl2 = RedLock::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
 
@@ -445,16 +469,18 @@ mod tests {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_lock_unlock_raii() -> Result<()> {
-        println!("{}", ADDRESSES.join(","));
-        let rl = RedLock::new(ADDRESSES.clone());
-        let rl2 = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
 
+        let rl = RedLock::new(addresses.clone());
+        let rl2 = RedLock::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
+
         async {
             let lock_guard = rl.acquire(&key, 1000).await;
             let lock = &lock_guard.lock;
@@ -474,13 +500,16 @@ mod tests {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_redlock_extend_lock() -> Result<()> {
-        let rl1 = RedLock::new(ADDRESSES.clone());
-        let rl2 = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl1 = RedLock::new(addresses.clone());
+        let rl2 = RedLock::new(addresses.clone());
 
         let key = rl1.get_unique_lock_id()?;
 
@@ -511,8 +540,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_redlock_extend_lock_releases() -> Result<()> {
-        let rl1 = RedLock::new(ADDRESSES.clone());
-        let rl2 = RedLock::new(ADDRESSES.clone());
+        let (_containers, addresses) = create_clients();
+
+        let rl1 = RedLock::new(addresses.clone());
+        let rl2 = RedLock::new(addresses.clone());
 
         let key = rl1.get_unique_lock_id()?;
 

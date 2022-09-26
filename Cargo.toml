@@ -1,14 +1,18 @@
 [package]
 
 name = "redlock-async"
-version = "0.0.3"
-authors = ["Jan-Erik Rediger <badboy@archlinux.us>", "Romain Boces <bocesr@gmail.com>"]
+version = "0.0.4"
+authors = [
+  "Jan-Erik Rediger <badboy@archlinux.us>",
+  "Romain Boces <bocesr@gmail.com>",
+  "hexcowboy <hex@cowboy.dev",
+]
 
 keywords = ["distributed", "locking", "redis", "redlock"]
 description = "Implementation of the distributed locking mechanism built on top of Async Redis"
 
-homepage = "https://github.com/rsecob/redlock-async-rs"
-repository = "https://github.com/rsecob/redlock-async-rs"
+homepage = "https://github.com/hexcowboy/redlock-async-rs"
+repository = "https://github.com/hexcowboy/redlock-async-rs"
 
 license = "BSD-3-Clause"
 readme = "README.md"
@@ -16,13 +20,13 @@ edition = "2018"
 
 [dependencies]
 redis = { version = "0.21.6", features = ["async-std-comp"] }
-tokio = { version = "1.21.0", features = ["rt", "time"] }
+tokio = { version = "1.21.1", features = ["rt", "time"] }
 rand = "0.8.5"
 futures = "0.3.24"
 
 [dev-dependencies]
-testcontainers = "0.12.0"
-once_cell = "1.7.2"
-anyhow = "1.0.40"
-tokio-test = "0.4.2"
-tokio = { version = "1.21.0", features = ["macros"] }
+once_cell = "1.15"
+testcontainers = "0.14"
+anyhow = "1.0"
+tokio = { version = "1.21.1", features = ["macros"] }
+tokio-test = "0.4"
