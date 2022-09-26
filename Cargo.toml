@@ -8,7 +8,7 @@ authors = [
   "hexcowboy <hex@cowboy.dev",
 ]
 
-keywords = ["distributed", "locking", "redis", "redlock"]
+keywords = ["distributed", "locking", "dls", "redis", "redlock"]
 description = "Implementation of the distributed locking mechanism built on top of Async Redis"
 
 homepage = "https://github.com/hexcowboy/redlock-async-rs"
@@ -16,7 +16,7 @@ repository = "https://github.com/hexcowboy/redlock-async-rs"
 
 license = "BSD-3-Clause"
 readme = "README.md"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 redis = { version = "0.21.6", features = ["async-std-comp"] }
