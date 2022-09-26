@@ -1,6 +1,6 @@
 # rslock - RedLock for Redis in Rust
 
-![Crates.io](https://img.shields.io/crates/v/rslock)
+[![Crates.io](https://img.shields.io/crates/v/rslock)][crates.io]
 [![Docs badge]][docs.rs]
 
 This is an implementation of Redlock, the [distributed locking mechanism][distlock] built on top of Redis.
@@ -51,7 +51,7 @@ async fn main() {
 
 ## Extending Locks
 
-It should be noted that "extending" redlocks actually just renews them. For example, when you extend a 1000ms lock after 500ms have elapsed by another 1000ms, the lock will live for a total of 1500ms. It does not add additional time the the existing lock. This is how it was implemented in the Node.js version of redlock and it will remain that way to be consistent. See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/redlock.rs#L22-L30).
+It should be noted that "extending" RedLocks actually just renews them. For example, when you extend a 1000ms lock after 500ms have elapsed by another 1000ms, the lock will live for a total of 1500ms. It does not add additional time the the existing lock. This is how it was implemented in the Node.js version of RedLock and it will remain that way to be consistent. See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/redlock.rs#L22-L30).
 
 ## Tests
 
@@ -77,4 +77,5 @@ BSD. See [LICENSE](LICENSE).
 
 [distlock]: http://redis.io/topics/distlock
 [docs badge]: https://img.shields.io/badge/docs.rs-rustdoc-green
+[crates.io]: https://crates.io/crates/rslock
 [docs.rs]: https://docs.rs/rslock/
