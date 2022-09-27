@@ -16,7 +16,7 @@ cargo build --release
 ## Usage
 
 ```rust
-use redlock::RedLock;
+use rslock::RedLock;
 
 #[tokio::main]
 async fn main() {
