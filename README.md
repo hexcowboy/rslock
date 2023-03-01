@@ -29,19 +29,16 @@ async fn main() {
     let lock;
     loop {
         // Create the lock
-        match rl.lock("mutex".as_bytes(), 1000).await {
-            Ok(l) => {
-                lock = l;
-                break;
-            }
-            Err(_) => (),
+        if rl.lock("mutex".as_bytes(), 1000).await.is_ok() {
+            lock = l;
+            break;
         }
     }
 
     // Extend the lock
     match rl.extend(&lock, 1000).await {
         Ok(_) => println!("lock extended!"),
-        Err(_) => (),
+        Err(_) => println!("lock couldn't be extended"),
     }
 
     // Unlock the lock
