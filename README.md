@@ -58,12 +58,6 @@ Run tests with:
 cargo test
 ```
 
-Run sample application with:
-
-```
-cargo run --release
-```
-
 ## Contribute
 
 If you find bugs or want to help otherwise, please [open an issue](https://github.com/rsecob/redlock-async-rs/issues).
