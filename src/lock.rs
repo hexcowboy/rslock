@@ -31,7 +31,7 @@ end
 "#;
 
 #[derive(Debug)]
-pub enum RedLockError {
+pub enum LockError {
     Io(io::Error),
     Redis(redis::RedisError),
     Unavailable,
@@ -42,7 +42,7 @@ pub enum RedLockError {
 /// Implements the necessary functionality to acquire and release locks
 /// and handles the Redis connections.
 #[derive(Debug, Clone)]
-pub struct RedLock {
+pub struct LockManager {
     /// List of all Redis clients
     pub servers: Vec<Client>,
     quorum: u32,
@@ -50,6 +50,7 @@ pub struct RedLock {
     retry_delay: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct Lock<'a> {
     /// The resource to lock. Will be used as the key in Redis.
     pub resource: Vec<u8>,
@@ -59,25 +60,26 @@ pub struct Lock<'a> {
     /// Should only be slightly smaller than the requested TTL.
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
-    pub lock_manager: &'a RedLock,
+    pub lock_manager: &'a LockManager,
 }
 
-pub struct RedLockGuard<'a> {
+#[derive(Debug, Clone)]
+pub struct LockGuard<'a> {
     pub lock: Lock<'a>,
 }
 
-impl Drop for RedLockGuard<'_> {
+impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
     }
 }
 
-impl RedLock {
+impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis connection uris.
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
-    pub fn new<T: AsRef<str> + IntoConnectionInfo>(uris: Vec<T>) -> RedLock {
+    pub fn new<T: AsRef<str> + IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
         let quorum = (uris.len() as u32) / 2 + 1;
 
         let servers: Vec<Client> = uris
@@ -85,7 +87,7 @@ impl RedLock {
             .map(|uri| Client::open(uri).unwrap())
             .collect();
 
-        RedLock {
+        LockManager {
             servers,
             quorum,
             retry_count: DEFAULT_RETRY_COUNT,
@@ -186,7 +188,7 @@ impl RedLock {
         value: &[u8],
         ttl: usize,
         lock: T,
-    ) -> Result<Lock<'_>, RedLockError>
+    ) -> Result<Lock<'_>, LockError>
     where
         T: Fn(&'b Client) -> Fut + 'a,
         Fut: Future<Output = bool> + 'b,
@@ -225,7 +227,7 @@ impl RedLock {
             tokio::time::sleep(Duration::from_millis(u64::from(n))).await
         }
 
-        Err(RedLockError::Unavailable)
+        Err(LockError::Unavailable)
     }
 
     /// Unlock the given lock.
@@ -248,11 +250,7 @@ impl RedLock {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a>(
-        &'a self,
-        resource: &'a [u8],
-        ttl: usize,
-    ) -> Result<Lock<'_>, RedLockError> {
+    pub async fn lock<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Result<Lock<'_>, LockError> {
         let val = self.get_unique_lock_id().unwrap();
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
@@ -261,10 +259,10 @@ impl RedLock {
         .await
     }
 
-    pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> RedLockGuard<'a> {
+    pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> LockGuard<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
-                return RedLockGuard { lock };
+                return LockGuard { lock };
             }
         }
     }
@@ -274,7 +272,7 @@ impl RedLock {
         &'a self,
         lock: &'a Lock<'_>,
         ttl: usize,
-    ) -> Result<Lock<'_>, RedLockError> {
+    ) -> Result<Lock<'_>, LockError> {
         self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
             self.extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
@@ -313,16 +311,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_get_unique_id() -> Result<()> {
-        let rl = RedLock::new(Vec::<String>::new());
+    async fn test_lock_get_unique_id() -> Result<()> {
+        let rl = LockManager::new(Vec::<String>::new());
         assert_eq!(rl.get_unique_lock_id()?.len(), 20);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_redlock_get_unique_id_uniqueness() -> Result<()> {
-        let rl = RedLock::new(Vec::<String>::new());
+    async fn test_lock_get_unique_id_uniqueness() -> Result<()> {
+        let rl = LockManager::new(Vec::<String>::new());
 
         let id1 = rl.get_unique_lock_id()?;
         let id2 = rl.get_unique_lock_id()?;
@@ -335,20 +333,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_valid_instance() {
+    async fn test_lock_valid_instance() {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
 
         assert_eq!(3, rl.servers.len());
         assert_eq!(2, rl.quorum);
     }
 
     #[tokio::test]
-    async fn test_redlock_direct_unlock_fails() -> Result<()> {
+    async fn test_lock_direct_unlock_fails() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -358,10 +356,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_direct_unlock_succeeds() -> Result<()> {
+    async fn test_lock_direct_unlock_succeeds() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -374,10 +372,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_direct_lock_succeeds() -> Result<()> {
+    async fn test_lock_direct_lock_succeeds() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -393,10 +391,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_unlock() -> Result<()> {
+    async fn test_lock_unlock() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
@@ -420,10 +418,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_lock() -> Result<()> {
+    async fn test_lock_lock() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
         match rl.lock(&key, 1000).await {
@@ -444,11 +442,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_lock_unlock() -> Result<()> {
+    async fn test_lock_lock_unlock() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
-        let rl2 = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
 
@@ -474,11 +472,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_lock_unlock_raii() -> Result<()> {
+    async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = RedLock::new(addresses.clone());
-        let rl2 = RedLock::new(addresses.clone());
+        let rl = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         async {
@@ -505,11 +503,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_extend_lock() -> Result<()> {
+    async fn test_lock_extend_lock() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl1 = RedLock::new(addresses.clone());
-        let rl2 = RedLock::new(addresses.clone());
+        let rl1 = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
 
         let key = rl1.get_unique_lock_id()?;
 
@@ -528,7 +526,7 @@ mod tests {
             match rl2.lock(&key, 1000).await {
                 Ok(_) => panic!("Expected an error when extending the lock but didn't receive one"),
                 Err(e) => match e {
-                    RedLockError::Unavailable => (),
+                    LockError::Unavailable => (),
                     _ => panic!("Unexpected error when extending lock"),
                 },
             }
@@ -539,11 +537,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redlock_extend_lock_releases() -> Result<()> {
+    async fn test_lock_extend_lock_releases() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl1 = RedLock::new(addresses.clone());
-        let rl2 = RedLock::new(addresses.clone());
+        let rl1 = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
 
         let key = rl1.get_unique_lock_id()?;
 
@@ -567,8 +565,8 @@ mod tests {
             match rl1.extend(&lock1.lock, 1000).await {
                 Ok(_) => panic!("Did not expect OK() when re-extending rl1"),
                 Err(e) => match e {
-                    RedLockError::Unavailable => (),
-                    _ => panic!("Expected RedLockError::Unavailable when re-extending rl1"),
+                    LockError::Unavailable => (),
+                    _ => panic!("Expected lockError::Unavailable when re-extending rl1"),
                 },
             }
         }

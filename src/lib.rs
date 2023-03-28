@@ -1,3 +1,3 @@
-mod redlock;
+mod lock;
 
-pub use crate::redlock::{Lock, RedLock, RedLockError};
+pub use crate::lock::{Lock, LockError, LockGuard, LockManager};

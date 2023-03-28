@@ -16,11 +16,11 @@ cargo build --release
 ## Usage
 
 ```rust
-use rslock::RedLock;
+use rslock::LockManager;
 
 #[tokio::main]
 async fn main() {
-    let rl = RedLock::new(vec![
+    let rl = LockManager::new(vec![
         "redis://127.0.0.1:6380/",
         "redis://127.0.0.1:6381/",
         "redis://127.0.0.1:6382/",
@@ -29,7 +29,7 @@ async fn main() {
     let lock;
     loop {
         // Create the lock
-        if rl.lock("mutex".as_bytes(), 1000).await.is_ok() {
+        if let Ok(l) = rl.lock("mutex".as_bytes(), 1000).await {
             lock = l;
             break;
         }
