@@ -294,7 +294,9 @@ mod tests {
 
     static DOCKER: Lazy<Cli> = Lazy::new(Cli::docker);
 
-    pub fn create_clients() -> (Containers, Vec<String>) {
+    fn is_normal<T: Sized + Send + Sync + Unpin>() {}
+
+    fn create_clients() -> (Containers, Vec<String>) {
         let containers: Containers = (1..=3)
             .map(|_| {
                 let image = RunnableImage::from(Redis::default()).with_tag("7-alpine");
@@ -308,6 +310,15 @@ mod tests {
             .collect();
 
         (containers, addresses)
+    }
+
+    // Test that the LockManager is Send + Sync
+    #[test]
+    fn test_is_normal() {
+        is_normal::<LockManager>();
+        is_normal::<LockError>();
+        is_normal::<Lock>();
+        is_normal::<LockGuard>();
     }
 
     #[tokio::test]
