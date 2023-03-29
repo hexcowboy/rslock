@@ -1,11 +1,21 @@
-# rslock - RedLock for Redis in Rust
+# rslock - Redlock for Redis in Rust
 
 [![Crates.io](https://img.shields.io/crates/v/rslock)][crates.io]
 [![Docs badge]][docs.rs]
 
 This is an implementation of Redlock, the [distributed locking mechanism][distlock] built on top of Redis.
 
-It is a fork of the existing [redlock-rs](https://github.com/badboy/redlock-rs) **with additional features like async Redis and the RedLock extend feature**.
+## Features
+
+- Lock extending
+- Async runtime support (tokio)
+- Async redis
+
+## Install
+
+```bash
+cargo add rslock
+```
 
 ## Build
 
@@ -48,7 +58,7 @@ async fn main() {
 
 ## Extending Locks
 
-It should be noted that "extending" RedLocks actually just renews them. For example, when you extend a 1000ms lock after 500ms have elapsed by another 1000ms, the lock will live for a total of 1500ms. It does not add additional time the the existing lock. This is how it was implemented in the Node.js version of RedLock and it will remain that way to be consistent. See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/redlock.rs#L22-L30).
+It should be noted that "extending" Redlocks actually just renews them. For example, when you extend a 1000ms lock after 500ms have elapsed by another 1000ms, the lock will live for a total of 1500ms. It does not add additional time the the existing lock. This is how it was implemented in the Node.js version of RedLock and it will remain that way to be consistent. See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/lock.rs#L22-L30).
 
 ## Tests
 
@@ -60,7 +70,7 @@ cargo test
 
 ## Contribute
 
-If you find bugs or want to help otherwise, please [open an issue](https://github.com/rsecob/redlock-async-rs/issues).
+If you find bugs or want to help otherwise, please [open an issue](https://github.com/hexcowboy/rslock/issues).
 
 ## License
 
