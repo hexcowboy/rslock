@@ -56,6 +56,21 @@ jobs:
           submodules: true
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
+      - name: Install Docker (MacOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install docker docker-compose
+      - name: Start Docker (MacOS)
+        if: matrix.os == 'macos-latest'
+        run: open --background -a Docker && sleep 5
+      - name: Install Docker (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install docker-desktop -y
+          choco install docker-compose -y
+          Restart-Service docker
+      - name: Start Docker (Windows)
+        if: matrix.os == 'windows-latest'
+        run: start /wait "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" && timeout 5
       - name: cargo generate-lockfile
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
