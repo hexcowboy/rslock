@@ -1,10 +1,9 @@
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use futures::Future;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, Rng, RngCore};
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisResult, Value};
 
@@ -95,18 +94,13 @@ impl LockManager {
         }
     }
 
-    /// Get 20 random bytes from `/dev/urandom`.
+    /// Get 20 random bytes from the pseudorandom interface.
     pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
-        let file = File::open("/dev/urandom")?;
-        let mut buf = Vec::with_capacity(20);
-        match file.take(20).read_to_end(&mut buf) {
-            Ok(20) => Ok(buf),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Can't read enough random bytes",
-            )),
-            Err(e) => Err(e),
-        }
+        || -> Result<Vec<u8>, io::Error> {
+            let mut buf = [0u8; 20];
+            thread_rng().fill_bytes(&mut buf);
+            Ok(buf.to_vec())
+        }()
     }
 
     /// Set retry count and retry delay.
