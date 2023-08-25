@@ -113,7 +113,6 @@ impl LockManager {
     }
 
     async fn lock_instance(
-        &self,
         client: &redis::Client,
         resource: &[u8],
         val: Vec<u8>,
@@ -139,7 +138,6 @@ impl LockManager {
     }
 
     async fn extend_lock_instance(
-        &self,
         client: &redis::Client,
         resource: &[u8],
         val: &[u8],
@@ -162,7 +160,7 @@ impl LockManager {
         }
     }
 
-    async fn unlock_instance(&self, client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
+    async fn unlock_instance(client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
         let mut con = match client.get_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
@@ -176,7 +174,7 @@ impl LockManager {
     }
 
     // Can be used for creating or extending a lock
-    async fn exec_or_retry<'a: 'b, 'b, T, Fut>(
+    async fn exec_or_retry<'a, T, Fut>(
         &'a self,
         resource: &[u8],
         value: &[u8],
@@ -184,8 +182,8 @@ impl LockManager {
         lock: T,
     ) -> Result<Lock<'a>, LockError>
     where
-        T: Fn(&'b Client) -> Fut + 'a,
-        Fut: Future<Output = bool> + 'b,
+        T: Fn(&'a Client) -> Fut,
+        Fut: Future<Output = bool>,
     {
         for _ in 0..self.retry_count {
             let start_time = Instant::now();
@@ -212,7 +210,7 @@ impl LockManager {
                 join_all(
                     self.servers
                         .iter()
-                        .map(|client| self.unlock_instance(client, resource, value)),
+                        .map(|client| Self::unlock_instance(client, resource, value)),
                 )
                 .await;
             }
@@ -232,7 +230,7 @@ impl LockManager {
         join_all(
             self.servers
                 .iter()
-                .map(|client| self.unlock_instance(client, &lock.resource, &lock.val)),
+                .map(|client| Self::unlock_instance(client, &lock.resource, &lock.val)),
         )
         .await;
     }
@@ -244,20 +242,16 @@ impl LockManager {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a, 'b: 'a>(
-        &'a self,
-        resource: &'b [u8],
-        ttl: usize,
-    ) -> Result<Lock<'a>, LockError> {
+    pub async fn lock<'a>(&'a self, resource: &[u8], ttl: usize) -> Result<Lock<'a>, LockError> {
         let val = self.get_unique_lock_id().unwrap();
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
-            self.lock_instance(client, resource, val.clone(), ttl)
+            Self::lock_instance(client, resource, val.clone(), ttl)
         })
         .await
     }
 
-    pub async fn acquire<'a, 'b: 'a>(&'a self, resource: &'b [u8], ttl: usize) -> LockGuard<'a> {
+    pub async fn acquire<'a>(&'a self, resource: &[u8], ttl: usize) -> LockGuard<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
                 return LockGuard { lock };
@@ -266,13 +260,9 @@ impl LockManager {
     }
 
     /// Extend the given lock by given time in milliseconds
-    pub async fn extend<'a>(
-        &'a self,
-        lock: &'a Lock<'_>,
-        ttl: usize,
-    ) -> Result<Lock<'_>, LockError> {
+    pub async fn extend<'a>(&'a self, lock: &Lock<'a>, ttl: usize) -> Result<Lock<'a>, LockError> {
         self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
-            self.extend_lock_instance(client, &lock.resource, &lock.val, ttl)
+            Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
         .await
     }
