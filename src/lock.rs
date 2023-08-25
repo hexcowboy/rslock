@@ -195,7 +195,7 @@ impl LockManager {
         value: &[u8],
         ttl: usize,
         lock: T,
-    ) -> Result<Lock<'_>, LockError>
+    ) -> Result<Lock<'a>, LockError>
     where
         T: Fn(&'b Client) -> Fut + 'a,
         Fut: Future<Output = bool> + 'b,
@@ -257,7 +257,7 @@ impl LockManager {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Result<Lock<'_>, LockError> {
+    pub async fn lock<'a, 'b: 'a>(&'a self, resource: &'b [u8], ttl: usize) -> Result<Lock<'a>, LockError> {
         let val = self.get_unique_lock_id().unwrap();
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
@@ -270,7 +270,7 @@ impl LockManager {
     ///
     /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
     #[cfg(feature = "async-std-comp")]
-    pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> LockGuard<'a> {
+    pub async fn acquire<'a, 'b: 'a>(&'a self, resource: &'b [u8], ttl: usize) -> LockGuard<'a> {
         let lock = self.acquire_no_guard(resource, ttl).await;
         LockGuard { lock }
     }
