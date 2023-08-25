@@ -257,7 +257,11 @@ impl LockManager {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a, 'b: 'a>(&'a self, resource: &'b [u8], ttl: usize) -> Result<Lock<'a>, LockError> {
+    pub async fn lock<'a, 'b: 'a>(
+        &'a self,
+        resource: &'b [u8],
+        ttl: usize,
+    ) -> Result<Lock<'a>, LockError> {
         let val = self.get_unique_lock_id().unwrap();
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
