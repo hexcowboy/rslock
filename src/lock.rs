@@ -255,11 +255,7 @@ impl LockManager {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a>(
-        &'a self,
-        resource: &[u8],
-        ttl: usize,
-    ) -> Result<Lock<'a>, LockError> {
+    pub async fn lock<'a>(&'a self, resource: &[u8], ttl: usize) -> Result<Lock<'a>, LockError> {
         let val = self.get_unique_lock_id().unwrap();
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
@@ -290,11 +286,7 @@ impl LockManager {
     }
 
     /// Extend the given lock by given time in milliseconds
-    pub async fn extend<'a>(
-        &'a self,
-        lock: &Lock<'a>,
-        ttl: usize,
-    ) -> Result<Lock<'a>, LockError> {
+    pub async fn extend<'a>(&'a self, lock: &Lock<'a>, ttl: usize) -> Result<Lock<'a>, LockError> {
         self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
             Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
