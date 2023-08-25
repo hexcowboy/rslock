@@ -62,11 +62,17 @@ pub struct Lock<'a> {
     pub lock_manager: &'a LockManager,
 }
 
+#[cfg(not(feature = "tokio-comp"))]
 #[derive(Debug, Clone)]
 pub struct LockGuard<'a> {
     pub lock: Lock<'a>,
 }
 
+
+// Dropping this guard inside the context of a tokio runtime if tokio-comp is enabled 
+// will block the tokio runtime. 
+// Because of this, the guard is not compiled if tokio-comp is enabled. 
+#[cfg(not(feature = "tokio-comp"))]
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
@@ -251,10 +257,20 @@ impl LockManager {
         .await
     }
 
+    /// Loops until the lock is acquired.
+    ///
+    /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
+    #[cfg(not(feature = "tokio-comp"))]
     pub async fn acquire<'a>(&'a self, resource: &[u8], ttl: usize) -> LockGuard<'a> {
+        let lock = self.acquire_no_guard(resource, ttl).await;
+        LockGuard{lock}
+    }
+
+    /// Loops until the lock is acquired.
+    pub async fn acquire_no_guard<'a>(&'a self, resource: &[u8], ttl: usize) -> Lock<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
-                return LockGuard { lock };
+                return lock;
             }
         }
     }
