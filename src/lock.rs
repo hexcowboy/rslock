@@ -502,7 +502,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(not(feature = "tokio-comp"), feature="async-std-comp"))]
+    #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients();
@@ -533,7 +533,7 @@ mod tests {
 
         Ok(())
     }
-    
+
     #[cfg(feature = "tokio-comp")]
     #[tokio::test]
     async fn test_lock_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
@@ -561,7 +561,6 @@ mod tests {
         if let Ok(_) = rl2.lock(&key, 1000).await {
             panic!("Lock couldn't be acquired");
         }
-        
 
         Ok(())
     }
