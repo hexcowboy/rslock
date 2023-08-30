@@ -502,7 +502,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(all(not(feature = "tokio-comp"), feature="async-std-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients();
@@ -530,6 +530,38 @@ mod tests {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
+
+        Ok(())
+    }
+    
+    #[cfg(feature = "tokio-comp")]
+    #[tokio::test]
+    async fn test_lock_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
+        let (_containers, addresses) = create_clients();
+
+        let rl = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
+        let key = rl.get_unique_lock_id()?;
+
+        async {
+            let lock_guard = rl.acquire(&key, 1000).await;
+            let lock = &lock_guard.lock;
+            assert!(
+                lock.validity_time > 900,
+                "validity time: {}",
+                lock.validity_time
+            );
+
+            if let Ok(_l) = rl2.lock(&key, 1000).await {
+                panic!("Lock acquired, even though it should be locked")
+            }
+        }
+        .await;
+
+        if let Ok(_) = rl2.lock(&key, 1000).await {
+            panic!("Lock couldn't be acquired");
+        }
+        
 
         Ok(())
     }
