@@ -63,23 +63,22 @@ pub struct Lock<'a> {
 }
 
 /// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
-/// 
-/// This is known to block the tokio runtime if this happens inside of the context of a tokio runtime 
+///
+/// This is known to block the tokio runtime if this happens inside of the context of a tokio runtime
 /// if `tokio-comp` is enabled as a feature on this crate or the `redis` crate.
 ///
-/// To eliminate this risk, if the `tokio-comp` flag is enabled, the `Drop` impl will not be compiled, 
+/// To eliminate this risk, if the `tokio-comp` flag is enabled, the `Drop` impl will not be compiled,
 /// meaning that dropping the `LockGuard` will be a no-op.
-/// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate 
-/// point to release the lock taken in `Redis`. 
+/// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate
+/// point to release the lock taken in `Redis`.
 #[derive(Debug, Clone)]
 pub struct LockGuard<'a> {
     pub lock: Lock<'a>,
 }
 
-
-/// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled 
-/// will block the tokio runtime. 
-/// Because of this, the guard is not compiled if `tokio-comp` is enabled. 
+/// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled
+/// will block the tokio runtime.
+/// Because of this, the guard is not compiled if `tokio-comp` is enabled.
 #[cfg(not(feature = "tokio-comp"))]
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
@@ -269,16 +268,16 @@ impl LockManager {
 
     /// Loops until the lock is acquired.
     ///
-    /// The lock is placed in a guard that will unlock the lock when the guard is dropped. 
+    /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
     #[cfg(feature = "async-std-comp")]
     pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> LockGuard<'a> {
         let lock = self.acquire_no_guard(resource, ttl).await;
-        LockGuard{lock}
+        LockGuard { lock }
     }
 
     /// Loops until the lock is acquired.
-    /// 
-    /// Either lock's value must expire after the ttl has elapsed, 
+    ///
+    /// Either lock's value must expire after the ttl has elapsed,
     /// or `LockManager::unlock` must be called to allow other clients to lock the same resource.
     pub async fn acquire_no_guard<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Lock<'a> {
         loop {
