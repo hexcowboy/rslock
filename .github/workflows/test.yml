@@ -24,8 +24,24 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       # https://twitter.com/jonhoo/status/1571290371124260865
-      - name: cargo test --locked
+      - name: cargo test --locked --all-features --all-targets
         run: cargo test --locked --all-features --all-targets
+  # Not all tests run with the --all-features flag. 
+  # This job is to ensure that tests that pertain only to the default feature set are run.
+  default-features:
+    runs-on: ubuntu-latest
+    name: ubuntu / stable / default-features 
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install stable 
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo generate-lockfile
+        if: hashFiles('Cargo.lock') == ''
+        run: cargo generate-lockfile
+      - name: cargo test --locked
+        run: cargo test --locked --all-targets
   minimal:
     runs-on: ubuntu-latest
     name: ubuntu / stable / minimal-versions
