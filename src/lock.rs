@@ -277,7 +277,7 @@ impl LockManager {
     ///
     /// Either lock's value must expire after the ttl has elapsed,
     /// or `LockManager::unlock` must be called to allow other clients to lock the same resource.
-    pub async fn acquire_no_guard<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Lock<'a> {
+    pub async fn acquire_no_guard<'a>(&'a self, resource: &[u8], ttl: usize) -> Lock<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
                 return lock;
@@ -375,7 +375,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        assert!(!rl.unlock_instance(&rl.servers[0], &key, &val).await);
+        assert!(!LockManager::unlock_instance(&rl.servers[0], &key, &val).await);
 
         Ok(())
     }
@@ -391,7 +391,7 @@ mod tests {
         let mut con = rl.servers[0].get_connection()?;
         redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
 
-        assert!(rl.unlock_instance(&rl.servers[0], &key, &val).await);
+        assert!(LockManager::unlock_instance(&rl.servers[0], &key, &val).await);
 
         Ok(())
     }
@@ -407,10 +407,7 @@ mod tests {
         let mut con = rl.servers[0].get_connection()?;
 
         redis::cmd("DEL").arg(&*key).execute(&mut con);
-        assert!(
-            rl.lock_instance(&rl.servers[0], &*key, val.clone(), 1000)
-                .await
-        );
+        assert!(LockManager::lock_instance(&rl.servers[0], &*key, val.clone(), 1000).await);
 
         Ok(())
     }
