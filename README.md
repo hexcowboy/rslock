@@ -17,6 +17,9 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 cargo add rslock
 ```
 
+> [!NOTE]  
+> The `default` feature of this crate will provide `async-std`. You may optionally use `tokio` by supplying the `tokio-comp` feature flag when installing, but `tokio` has limitations that will not grant access to some parts of the API ([read more here](https://github.com/hexcowboy/rslock/pull/4#issuecomment-1693711182)).
+
 ## Build
 
 ```
