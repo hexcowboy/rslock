@@ -62,11 +62,24 @@ pub struct Lock<'a> {
     pub lock_manager: &'a LockManager,
 }
 
+/// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
+///
+/// This is known to block the tokio runtime if this happens inside of the context of a tokio runtime
+/// if `tokio-comp` is enabled as a feature on this crate or the `redis` crate.
+///
+/// To eliminate this risk, if the `tokio-comp` flag is enabled, the `Drop` impl will not be compiled,
+/// meaning that dropping the `LockGuard` will be a no-op.
+/// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate
+/// point to release the lock taken in `Redis`.
 #[derive(Debug, Clone)]
 pub struct LockGuard<'a> {
     pub lock: Lock<'a>,
 }
 
+/// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled
+/// will block the tokio runtime.
+/// Because of this, the guard is not compiled if `tokio-comp` is enabled.
+#[cfg(not(feature = "tokio-comp"))]
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
@@ -253,10 +266,23 @@ impl LockManager {
         .await
     }
 
+    /// Loops until the lock is acquired.
+    ///
+    /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
+    #[cfg(feature = "async-std-comp")]
     pub async fn acquire<'a>(&'a self, resource: &'a [u8], ttl: usize) -> LockGuard<'a> {
+        let lock = self.acquire_no_guard(resource, ttl).await;
+        LockGuard { lock }
+    }
+
+    /// Loops until the lock is acquired.
+    ///
+    /// Either lock's value must expire after the ttl has elapsed,
+    /// or `LockManager::unlock` must be called to allow other clients to lock the same resource.
+    pub async fn acquire_no_guard<'a>(&'a self, resource: &'a [u8], ttl: usize) -> Lock<'a> {
         loop {
             if let Ok(lock) = self.lock(resource, ttl).await {
-                return LockGuard { lock };
+                return lock;
             }
         }
     }
@@ -476,6 +502,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients();
@@ -507,6 +534,38 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "tokio-comp")]
+    #[tokio::test]
+    async fn test_lock_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
+        let (_containers, addresses) = create_clients();
+
+        let rl = LockManager::new(addresses.clone());
+        let rl2 = LockManager::new(addresses.clone());
+        let key = rl.get_unique_lock_id()?;
+
+        async {
+            let lock_guard = rl.acquire(&key, 1000).await;
+            let lock = &lock_guard.lock;
+            assert!(
+                lock.validity_time > 900,
+                "validity time: {}",
+                lock.validity_time
+            );
+
+            if let Ok(_l) = rl2.lock(&key, 1000).await {
+                panic!("Lock acquired, even though it should be locked")
+            }
+        }
+        .await;
+
+        if let Ok(_) = rl2.lock(&key, 1000).await {
+            panic!("Lock couldn't be acquired");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "async-std-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock() -> Result<()> {
         let (_containers, addresses) = create_clients();
@@ -541,6 +600,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "async-std-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock_releases() -> Result<()> {
         let (_containers, addresses) = create_clients();
