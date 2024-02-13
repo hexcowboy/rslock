@@ -8,7 +8,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 ## Features
 
 - Lock extending
-- Async runtime support (tokio)
+- Async runtime support (async-std and tokio)
 - Async redis
 
 ## Install
