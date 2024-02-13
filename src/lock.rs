@@ -34,6 +34,7 @@ pub enum LockError {
     Io(io::Error),
     Redis(redis::RedisError),
     Unavailable,
+    TtlExceeded,
 }
 
 /// The lock manager.
@@ -207,6 +208,11 @@ impl LockManager {
 
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
+            let elapsed_ms =
+                elapsed.as_secs() as usize * 1000 + elapsed.subsec_nanos() as usize / 1_000_000;
+            if ttl <= drift + elapsed_ms {
+                return Err(LockError::TtlExceeded);
+            }
             let validity_time = ttl
                 - drift
                 - elapsed.as_secs() as usize * 1000
@@ -627,6 +633,31 @@ mod tests {
             }
         }
         .await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lock_with_short_ttl_and_retries() -> Result<()> {
+        let (_containers, addresses) = create_clients();
+
+        let mut rl = LockManager::new(addresses.clone());
+        // Set a high retry count to ensure retries happen
+        rl.set_retry(10, 10); // Retry 10 times with 10 milliseconds delay
+
+        let key = rl.get_unique_lock_id()?;
+
+        // Use a very short TTL
+        let ttl = 1; // 1 millisecond
+
+        // Acquire lock
+        let lock_result = rl.lock(&key, ttl).await;
+
+        // Check if the error returned is TtlExceeded
+        match lock_result {
+            Err(LockError::TtlExceeded) => (), // Test passes
+            _ => panic!("Expected LockError::TtlExceeded, but got {:?}", lock_result),
+        }
 
         Ok(())
     }
