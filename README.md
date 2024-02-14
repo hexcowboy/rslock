@@ -18,7 +18,7 @@ cargo add rslock
 ```
 
 > [!NOTE]  
-> The `default` feature of this crate will provide `async-std`. You may optionally use `tokio` by supplying the `tokio-comp` feature flag when installing, but `tokio` has limitations that will not grant access to some parts of the API ([read more here](https://github.com/hexcowboy/rslock/pull/4#issuecomment-1693711182)).
+> The `default` feature of this crate will provide async-std. You may optionally use tokio by supplying the `tokio-comp` feature flag when installing, but tokio has limitations that will not grant access to some parts of the API ([read more here](https://github.com/hexcowboy/rslock/pull/4#issuecomment-1693711182)).
 
 ## Build
 
@@ -61,7 +61,7 @@ async fn main() {
 
 ## Extending Locks
 
-It should be noted that "extending" locks actually just renews them. For example, when you extend a 1000ms lock after 500ms have elapsed by another 1000ms, the lock will live for a total of 1500ms. It does not add additional time the the existing lock. This is how it was implemented in the Node.js version of Redlock and it will remain that way to be consistent. See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/lock.rs#L22-L30).
+Extending a lock effectively renews its duration instead of adding extra time to it. For instance, if a 1000ms lock is extended by 1000ms after 500ms pass, it will only last for a total of 1500ms, not 2000ms. This approach is consistent with the [Node.js Redlock implementation](https://www.npmjs.com/package/redlock). See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/lock.rs#L22-L30).
 
 ## Tests
 
