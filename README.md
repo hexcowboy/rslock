@@ -17,7 +17,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 cargo add rslock
 ```
 
-> [!NOTE]  
+> [!NOTE]
 > The `default` feature of this crate will provide async-std. You may optionally use tokio by supplying the `tokio-comp` feature flag when installing, but tokio has limitations that will not grant access to some parts of the API ([read more here](https://github.com/hexcowboy/rslock/pull/4#issuecomment-1693711182)).
 
 ## Build
@@ -29,6 +29,8 @@ cargo build --release
 ## Usage
 
 ```rust
+use std::time::Duration;
+
 use rslock::LockManager;
 
 #[tokio::main]
@@ -42,14 +44,17 @@ async fn main() {
     let lock;
     loop {
         // Create the lock
-        if let Ok(l) = rl.lock("mutex".as_bytes(), 1000).await {
+        if let Ok(l) = rl
+            .lock("mutex".as_bytes(), Duration::from_millis(1000))
+            .await
+        {
             lock = l;
             break;
         }
     }
 
     // Extend the lock
-    match rl.extend(&lock, 1000).await {
+    match rl.extend(&lock, Duration::from_millis(1000)).await {
         Ok(_) => println!("lock extended!"),
         Err(_) => println!("lock couldn't be extended"),
     }
@@ -57,6 +62,7 @@ async fn main() {
     // Unlock the lock
     rl.unlock(&lock).await;
 }
+
 ```
 
 ## Extending Locks

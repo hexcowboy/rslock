@@ -1,7 +1,7 @@
 [package]
 
 name = "rslock"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
   "Jan-Erik Rediger <badboy@archlinux.us>",
   "Romain Boces <bocesr@gmail.com>",
