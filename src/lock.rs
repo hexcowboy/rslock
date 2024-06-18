@@ -92,7 +92,7 @@ impl LockManager {
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
-    pub fn new<T: AsRef<str> + IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
+    pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
         let quorum = (uris.len() as u32) / 2 + 1;
 
         let servers: Vec<Client> = uris
