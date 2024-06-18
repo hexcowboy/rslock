@@ -29,12 +29,21 @@ else
 end
 "#;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    Io(io::Error),
-    Redis(redis::RedisError),
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+
+    #[error("Resource is unavailable")]
     Unavailable,
+
+    #[error("TTL exceeded")]
     TtlExceeded,
+
+    #[error("TTL too large")]
     TtlTooLarge,
 }
 
