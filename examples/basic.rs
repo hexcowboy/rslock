@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rslock::LockManager;
 
 #[tokio::main]
@@ -11,14 +13,17 @@ async fn main() {
     let lock;
     loop {
         // Create the lock
-        if let Ok(l) = rl.lock("mutex".as_bytes(), 1000).await {
+        if let Ok(l) = rl
+            .lock("mutex".as_bytes(), Duration::from_millis(1000))
+            .await
+        {
             lock = l;
             break;
         }
     }
 
     // Extend the lock
-    match rl.extend(&lock, 1000).await {
+    match rl.extend(&lock, Duration::from_millis(1000)).await {
         Ok(_) => println!("lock extended!"),
         Err(_) => println!("lock couldn't be extended"),
     }

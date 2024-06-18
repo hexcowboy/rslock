@@ -8,7 +8,7 @@ use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisResult, Value};
 
 const DEFAULT_RETRY_COUNT: u32 = 3;
-const DEFAULT_RETRY_DELAY: u32 = 200;
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(200);
 const CLOCK_DRIFT_FACTOR: f32 = 0.01;
 const UNLOCK_SCRIPT: &str = r#"
 if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -35,6 +35,7 @@ pub enum LockError {
     Redis(redis::RedisError),
     Unavailable,
     TtlExceeded,
+    TtlTooLarge,
 }
 
 /// The lock manager.
@@ -47,7 +48,7 @@ pub struct LockManager {
     pub servers: Vec<Client>,
     quorum: u32,
     retry_count: u32,
-    retry_delay: u32,
+    retry_delay: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +122,7 @@ impl LockManager {
     ///
     /// Retry count defaults to `3`.
     /// Retry delay defaults to `200`.
-    pub fn set_retry(&mut self, count: u32, delay: u32) {
+    pub fn set_retry(&mut self, count: u32, delay: Duration) {
         self.retry_count = count;
         self.retry_delay = delay;
     }
@@ -234,8 +235,13 @@ impl LockManager {
                 .await;
             }
 
-            let n = thread_rng().gen_range(0..self.retry_delay);
-            tokio::time::sleep(Duration::from_millis(u64::from(n))).await
+            let retry_delay: u64 = self
+                .retry_delay
+                .as_millis()
+                .try_into()
+                .map_err(|_| LockError::TtlTooLarge)?;
+            let n = thread_rng().gen_range(0..retry_delay);
+            tokio::time::sleep(Duration::from_millis(n)).await
         }
 
         Err(LockError::Unavailable)
@@ -261,8 +267,14 @@ impl LockManager {
     ///
     /// If it fails. `None` is returned.
     /// A user should retry after a short wait time.
-    pub async fn lock<'a>(&'a self, resource: &[u8], ttl: usize) -> Result<Lock<'a>, LockError> {
-        let val = self.get_unique_lock_id().unwrap();
+    ///
+    /// May return `LockError::TtlTooLarge` if `ttl` is too large.
+    pub async fn lock<'a>(&'a self, resource: &[u8], ttl: Duration) -> Result<Lock<'a>, LockError> {
+        let val = self.get_unique_lock_id().map_err(LockError::Io)?;
+        let ttl = ttl
+            .as_millis()
+            .try_into()
+            .map_err(|_| LockError::TtlTooLarge)?;
 
         self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
             Self::lock_instance(client, resource, val.clone(), ttl)
@@ -273,26 +285,49 @@ impl LockManager {
     /// Loops until the lock is acquired.
     ///
     /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
+    ///
+    /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     #[cfg(feature = "async-std-comp")]
-    pub async fn acquire<'a>(&'a self, resource: &[u8], ttl: usize) -> LockGuard<'a> {
-        let lock = self.acquire_no_guard(resource, ttl).await;
-        LockGuard { lock }
+    pub async fn acquire<'a>(
+        &'a self,
+        resource: &[u8],
+        ttl: Duration,
+    ) -> Result<LockGuard<'a>, LockError> {
+        let lock = self.acquire_no_guard(resource, ttl).await?;
+        Ok(LockGuard { lock })
     }
 
     /// Loops until the lock is acquired.
     ///
     /// Either lock's value must expire after the ttl has elapsed,
     /// or `LockManager::unlock` must be called to allow other clients to lock the same resource.
-    pub async fn acquire_no_guard<'a>(&'a self, resource: &[u8], ttl: usize) -> Lock<'a> {
+    ///
+    /// May return `LockError::TtlTooLarge` if `ttl` is too large.
+    pub async fn acquire_no_guard<'a>(
+        &'a self,
+        resource: &[u8],
+        ttl: Duration,
+    ) -> Result<Lock<'a>, LockError> {
         loop {
-            if let Ok(lock) = self.lock(resource, ttl).await {
-                return lock;
+            match self.lock(resource, ttl).await {
+                Ok(lock) => return Ok(lock),
+                Err(LockError::TtlTooLarge) => return Err(LockError::TtlTooLarge),
+                Err(_) => continue,
             }
         }
     }
 
     /// Extend the given lock by given time in milliseconds
-    pub async fn extend<'a>(&'a self, lock: &Lock<'a>, ttl: usize) -> Result<Lock<'a>, LockError> {
+    pub async fn extend<'a>(
+        &'a self,
+        lock: &Lock<'a>,
+        ttl: Duration,
+    ) -> Result<Lock<'a>, LockError> {
+        let ttl = ttl
+            .as_millis()
+            .try_into()
+            .map_err(|_| LockError::TtlTooLarge)?;
+
         self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
             Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
@@ -452,7 +487,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
-        match rl.lock(&key, 1000).await {
+        match rl.lock(&key, Duration::from_millis(1000)).await {
             Ok(lock) => {
                 assert_eq!(key, lock.resource);
                 assert_eq!(20, lock.val.len());
@@ -478,20 +513,20 @@ mod tests {
 
         let key = rl.get_unique_lock_id()?;
 
-        let lock = rl.lock(&key, 1000).await.unwrap();
+        let lock = rl.lock(&key, Duration::from_millis(1000)).await.unwrap();
         assert!(
             lock.validity_time > 900,
             "validity time: {}",
             lock.validity_time
         );
 
-        if let Ok(_l) = rl2.lock(&key, 1000).await {
+        if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
             panic!("Lock acquired, even though it should be locked")
         }
 
         rl.unlock(&lock).await;
 
-        match rl2.lock(&key, 1000).await {
+        match rl2.lock(&key, Duration::from_millis(1000)).await {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
@@ -509,7 +544,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         async {
-            let lock_guard = rl.acquire(&key, 1000).await;
+            let lock_guard = rl.acquire(&key, Duration::from_millis(1000)).await.unwrap();
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 900,
@@ -517,13 +552,13 @@ mod tests {
                 lock.validity_time
             );
 
-            if let Ok(_l) = rl2.lock(&key, 1000).await {
+            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
         }
         .await;
 
-        match rl2.lock(&key, 1000).await {
+        match rl2.lock(&key, Duration::from_millis(1000)).await {
             Ok(l) => assert!(l.validity_time > 900),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
@@ -541,7 +576,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         async {
-            let lock_guard = rl.acquire(&key, 1000).await;
+            let lock_guard = rl.acquire(&key, Duration::from_millis(1000)).await.unwrap();
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 900,
@@ -549,13 +584,13 @@ mod tests {
                 lock.validity_time
             );
 
-            if let Ok(_l) = rl2.lock(&key, 1000).await {
+            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
         }
         .await;
 
-        if let Ok(_) = rl2.lock(&key, 1000).await {
+        if let Ok(_) = rl2.lock(&key, Duration::from_millis(1000)).await {
             panic!("Lock couldn't be acquired");
         }
 
@@ -573,18 +608,23 @@ mod tests {
         let key = rl1.get_unique_lock_id()?;
 
         async {
-            let lock1 = rl1.acquire(&key, 1000).await;
+            let lock1 = rl1
+                .acquire(&key, Duration::from_millis(1000))
+                .await
+                .unwrap();
 
             // Wait half a second before locking again
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-            rl1.extend(&lock1.lock, 1000).await.unwrap();
+            rl1.extend(&lock1.lock, Duration::from_millis(1000))
+                .await
+                .unwrap();
 
             // Wait another half a second to see if lock2 can unlock
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             // Assert lock2 can't access after extended lock
-            match rl2.lock(&key, 1000).await {
+            match rl2.lock(&key, Duration::from_millis(1000)).await {
                 Ok(_) => panic!("Expected an error when extending the lock but didn't receive one"),
                 Err(e) => match e {
                     LockError::Unavailable => (),
@@ -609,14 +649,16 @@ mod tests {
 
         async {
             // Create 500ms lock and immediately extend 500ms
-            let lock1 = rl1.acquire(&key, 500).await;
-            rl1.extend(&lock1.lock, 500).await.unwrap();
+            let lock1 = rl1.acquire(&key, Duration::from_millis(500)).await.unwrap();
+            rl1.extend(&lock1.lock, Duration::from_millis(500))
+                .await
+                .unwrap();
 
             // Wait one second for the lock to expire
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
             // Assert rl2 can lock with the key now
-            match rl2.lock(&key, 1000).await {
+            match rl2.lock(&key, Duration::from_millis(1000)).await {
                 Err(_) => {
                     panic!("Unexpected error when trying to claim free lock after extend expired")
                 }
@@ -624,7 +666,7 @@ mod tests {
             }
 
             // Also assert rl1 can't reuse lock1
-            match rl1.extend(&lock1.lock, 1000).await {
+            match rl1.extend(&lock1.lock, Duration::from_millis(1000)).await {
                 Ok(_) => panic!("Did not expect OK() when re-extending rl1"),
                 Err(e) => match e {
                     LockError::Unavailable => (),
@@ -643,12 +685,12 @@ mod tests {
 
         let mut rl = LockManager::new(addresses.clone());
         // Set a high retry count to ensure retries happen
-        rl.set_retry(10, 10); // Retry 10 times with 10 milliseconds delay
+        rl.set_retry(10, Duration::from_millis(10)); // Retry 10 times with 10 milliseconds delay
 
         let key = rl.get_unique_lock_id()?;
 
         // Use a very short TTL
-        let ttl = 1; // 1 millisecond
+        let ttl = Duration::from_millis(1);
 
         // Acquire lock
         let lock_result = rl.lock(&key, ttl).await;
@@ -660,5 +702,19 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_lock_ttl_duration_conversion_error() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+        let key = rl.get_unique_lock_id().unwrap();
+
+        // Too big Duration, fails - technical limit is from_millis(u64::MAX)
+        let ttl = Duration::from_secs(u64::MAX);
+        match rl.lock(&key, ttl).await {
+            Ok(_) => panic!("Expected LockError::TtlTooLarge"),
+            Err(_) => (), // Test passes
+        }
     }
 }
