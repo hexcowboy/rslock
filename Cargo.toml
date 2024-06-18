@@ -25,7 +25,7 @@ default = ["async-std-comp"]
 
 [dependencies]
 redis = { version = "0.24.0" }
-tokio = { version = "1.36.0", features = ["rt", "time"] }
+tokio = { version = "1.38.0", features = ["rt", "time"] }
 rand = "0.8.5"
 futures = "0.3.30"
 thiserror = "1.0.61"
@@ -33,6 +33,6 @@ thiserror = "1.0.61"
 [dev-dependencies]
 once_cell = "^1.19.0"
 testcontainers = "^0.14.0"
-anyhow = "^1.0.79"
-tokio = { version = "^1.36.0", features = ["macros", "rt-multi-thread"] }
-tokio-test = "^0.4.3"
+anyhow = "^1.0.86"
+tokio = { version = "^1.38.0", features = ["macros", "rt-multi-thread"] }
+tokio-test = "^0.4.4"
