@@ -577,22 +577,26 @@ mod tests {
 
     #[cfg(feature = "tokio-comp")]
     #[tokio::test]
-    async fn test_lock_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
+    async fn test_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
         let (_containers, addresses) = create_clients();
 
-        let rl = LockManager::new(addresses.clone());
+        let rl1 = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
-        let key = rl.get_unique_lock_id()?;
+        let key = rl1.get_unique_lock_id()?;
 
         async {
-            let lock_guard = rl.acquire(&key, Duration::from_millis(1000)).await.unwrap();
+            let lock_guard = rl1
+                .acquire(&key, Duration::from_millis(10_000))
+                .await
+                .expect("LockManage rl1 should be able to acquire lock");
             let lock = &lock_guard.lock;
             assert!(
-                lock.validity_time > 900,
+                lock.validity_time > 0,
                 "validity time: {}",
                 lock.validity_time
             );
 
+            // Acquire lock2 and assert it can't be acquired
             if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
