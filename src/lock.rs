@@ -70,7 +70,7 @@ pub struct Lock<'a> {
     /// Should only be slightly smaller than the requested TTL.
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
-    pub lock_manager: Option<&'a LockManager>,
+    pub lock_manager: &'a LockManager,
 }
 
 /// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
@@ -93,7 +93,7 @@ pub struct LockGuard<'a> {
 #[cfg(not(feature = "tokio-comp"))]
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        futures::executor::block_on(self.lock.lock_manager.unwrap().unlock(&self.lock));
+        futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
     }
 }
 
@@ -197,7 +197,6 @@ impl LockManager {
         }
     }
 
-    #[cfg(feature = "tokio-comp")]
     // Can be used for creating or extending a lock
     async fn exec_or_retry<'a, T, Fut>(
         &'a self,
@@ -231,67 +230,7 @@ impl LockManager {
 
             if n >= self.quorum && validity_time > 0 {
                 return Ok(Lock {
-                    lock_manager: None,
-                    resource: resource.to_vec(),
-                    val: value.to_vec(),
-                    validity_time,
-                });
-            } else {
-                join_all(
-                    self.servers
-                        .iter()
-                        .map(|client| Self::unlock_instance(client, resource, value)),
-                )
-                .await;
-            }
-
-            let retry_delay: u64 = self
-                .retry_delay
-                .as_millis()
-                .try_into()
-                .map_err(|_| LockError::TtlTooLarge)?;
-            let n = thread_rng().gen_range(0..retry_delay);
-            tokio::time::sleep(Duration::from_millis(n)).await
-        }
-
-        Err(LockError::Unavailable)
-    }
-
-    #[cfg(not(feature = "tokio-comp"))]
-    // Can be used for creating or extending a lock
-    async fn exec_or_retry<'a, T, Fut>(
-        &'a self,
-        resource: &[u8],
-        value: &[u8],
-        ttl: usize,
-        lock: T,
-    ) -> Result<Lock<'a>, LockError>
-    where
-        T: Fn(&'a Client) -> Fut,
-        Fut: Future<Output = bool>,
-    {
-        for _ in 0..self.retry_count {
-            let start_time = Instant::now();
-            let n = join_all(self.servers.iter().map(&lock))
-                .await
-                .into_iter()
-                .fold(0, |count, locked| if locked { count + 1 } else { count });
-
-            let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
-            let elapsed = start_time.elapsed();
-            let elapsed_ms =
-                elapsed.as_secs() as usize * 1000 + elapsed.subsec_nanos() as usize / 1_000_000;
-            if ttl <= drift + elapsed_ms {
-                return Err(LockError::TtlExceeded);
-            }
-            let validity_time = ttl
-                - drift
-                - elapsed.as_secs() as usize * 1000
-                - elapsed.subsec_nanos() as usize / 1_000_000;
-
-            if n >= self.quorum && validity_time > 0 {
-                return Ok(Lock {
-                    lock_manager: Some(self),
+                    lock_manager: self,
                     resource: resource.to_vec(),
                     val: value.to_vec(),
                     validity_time,
@@ -357,6 +296,7 @@ impl LockManager {
     /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
+    #[cfg(feature = "async-std-comp")]
     pub async fn acquire<'a>(
         &'a self,
         resource: &[u8],
@@ -538,7 +478,7 @@ mod tests {
             .unwrap();
 
         let lock = Lock {
-            lock_manager: Some(&rl),
+            lock_manager: &rl,
             resource: key,
             val,
             validity_time: 0,
