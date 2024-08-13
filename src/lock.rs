@@ -732,4 +732,27 @@ mod tests {
             Err(_) => (), // Test passes
         }
     }
+
+    #[tokio::test]
+    async fn test_lock_send_lock_manager() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Send the lock and entry through the channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        tx.send(("some info", lock, rl)).await.unwrap();
+
+        let j = tokio::spawn(async move {
+            // Retrieve from channel and use
+            if let Some((_entry, lock, rl)) = rx.recv().await {
+                rl.unlock(&lock).await;
+            }
+        });
+        let _ = j.await;
+    }
 }
