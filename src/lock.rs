@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
@@ -77,6 +77,16 @@ pub struct Lock {
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
     pub lock_manager: LockManager,
+    /// A flag indicating that this lock has been freed.
+    is_freed: AtomicBool,
+}
+
+impl Lock {
+    /// Retrieves the status of the lock, indicating whether it has been released.
+    /// **Note**: This status reflects only manual release by calling `unlock`.
+    pub fn is_freed(&self) -> bool {
+        self.is_freed.load(Ordering::Acquire)
+    }
 }
 
 /// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
@@ -239,6 +249,7 @@ impl LockManager {
                     resource: resource.to_vec(),
                     val: value.to_vec(),
                     validity_time,
+                    is_freed: false.into(),
                 });
             } else {
                 join_all(
@@ -274,6 +285,7 @@ impl LockManager {
                 .map(|client| Self::unlock_instance(client, &lock.resource, &lock.val)),
         )
         .await;
+        lock.is_freed.store(true, Ordering::Release);
     }
 
     /// Acquire the lock for the given resource and the requested TTL.
@@ -484,6 +496,7 @@ mod tests {
             resource: key,
             val,
             validity_time: 0,
+            is_freed: false.into(),
         };
 
         rl.unlock(&lock).await;
@@ -754,5 +767,38 @@ mod tests {
             }
         });
         let _ = j.await;
+    }
+    #[tokio::test]
+    async fn test_is_freed_flag() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock1 = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        let lock1 = Arc::new(lock1);
+        // Send the lock and entry through the channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        tx.send(("some info", lock1.clone(), rl.clone()))
+            .await
+            .unwrap();
+
+        let j = tokio::spawn(async move {
+            // Retrieve from channel and use
+            if let Some((_entry, lock1, rl)) = rx.recv().await {
+                rl.unlock(&lock1).await;
+            }
+        });
+        let _ = j.await;
+        assert!(lock1.is_freed());
+
+        let lock2 = rl
+            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+        rl.unlock(&lock2).await;
+        assert!(lock2.is_freed());
     }
 }
