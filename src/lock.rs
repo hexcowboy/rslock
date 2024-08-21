@@ -66,7 +66,7 @@ struct LockManagerInner {
     quorum: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Lock {
     /// The resource to lock. Will be used as the key in Redis.
     pub resource: Vec<u8>,
@@ -88,7 +88,7 @@ pub struct Lock {
 /// meaning that dropping the `LockGuard` will be a no-op.
 /// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate
 /// point to release the lock taken in `Redis`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LockGuard {
     pub lock: Lock,
 }
