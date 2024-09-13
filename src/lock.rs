@@ -1,5 +1,5 @@
 use std::io;
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
@@ -46,6 +46,15 @@ pub enum LockError {
 
     #[error("TTL too large")]
     TtlTooLarge,
+
+    #[error("Redis connection failed for all servers")]
+    RedisConnectionFailed,
+
+    #[error("Redis key mismatch: expected value does not match actual value")]
+    RedisKeyMismatch,
+
+    #[error("Redis key not found")]
+    RedisKeyNotFound,
 }
 
 /// The lock manager.
@@ -66,6 +75,12 @@ struct LockManagerInner {
     quorum: u32,
 }
 
+/// A distributed lock that can be acquired and released across multiple Redis instances.
+///
+/// A `Lock` represents a distributed lock in Redis.
+/// The lock is associated with a resource, identified by a unique key, and a value that identifies
+/// the lock owner. The `LockManager` is responsible for managing the acquisition, release, and extension
+/// of locks.
 #[derive(Debug)]
 pub struct Lock {
     /// The resource to lock. Will be used as the key in Redis.
@@ -77,16 +92,6 @@ pub struct Lock {
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
     pub lock_manager: LockManager,
-    /// A flag indicating that this lock has been freed.
-    is_freed: AtomicBool,
-}
-
-impl Lock {
-    /// Retrieves the status of the lock, indicating whether it has been released.
-    /// **Note**: This status reflects only manual release by calling `unlock`.
-    pub fn is_freed(&self) -> bool {
-        self.is_freed.load(Ordering::Acquire)
-    }
 }
 
 /// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
@@ -249,7 +254,6 @@ impl LockManager {
                     resource: resource.to_vec(),
                     val: value.to_vec(),
                     validity_time,
-                    is_freed: false.into(),
                 });
             } else {
                 join_all(
@@ -273,6 +277,29 @@ impl LockManager {
         Err(LockError::Unavailable)
     }
 
+    // Query Redis for a key's value and keep trying each server until a successful result is returned
+    async fn query_redis_for_key_value(
+        &self,
+        resource: &[u8],
+    ) -> Result<Option<Vec<u8>>, LockError> {
+        for client in &self.lock_manager_inner.servers {
+            let mut con = match client.get_async_connection().await {
+                Ok(con) => con,
+                Err(_) => continue, // If connection fails, try the next server
+            };
+
+            let result: RedisResult<Option<Vec<u8>>> =
+                redis::cmd("GET").arg(resource).query_async(&mut con).await;
+
+            match result {
+                Ok(val) => return Ok(val),
+                Err(_) => continue, // If query fails, try the next server
+            }
+        }
+
+        Err(LockError::RedisConnectionFailed) // All servers failed
+    }
+
     /// Unlock the given lock.
     ///
     /// Unlock is best effort. It will simply try to contact all instances
@@ -285,7 +312,6 @@ impl LockManager {
                 .map(|client| Self::unlock_instance(client, &lock.resource, &lock.val)),
         )
         .await;
-        lock.is_freed.store(true, Ordering::Release);
     }
 
     /// Acquire the lock for the given resource and the requested TTL.
@@ -352,6 +378,30 @@ impl LockManager {
             Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
         .await
+    }
+
+    /// Checks if the given lock has been freed (i.e., is no longer held).
+    ///
+    /// This method queries Redis to determine if the key associated with the lock
+    /// is still present and matches the value of this lock. If the key is missing
+    /// or the value does not match, the lock is considered freed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if the lock is considered freed (either because the key does not exist
+    /// or the value does not match), otherwise `Ok(false)`. Returns an error if a Redis
+    /// connection or query fails.
+    pub async fn is_freed(&self, lock: &Lock) -> Result<bool, LockError> {
+        match self.query_redis_for_key_value(&lock.resource).await? {
+            Some(val) => {
+                if val != lock.val {
+                    Err(LockError::RedisKeyMismatch)
+                } else {
+                    Ok(false) // Key is present and matches the lock value
+                }
+            }
+            None => Err(LockError::RedisKeyNotFound), // Key does not exist
+        }
     }
 }
 
@@ -496,7 +546,6 @@ mod tests {
             resource: key,
             val,
             validity_time: 0,
-            is_freed: false.into(),
         };
 
         rl.unlock(&lock).await;
@@ -768,8 +817,9 @@ mod tests {
         });
         let _ = j.await;
     }
+
     #[tokio::test]
-    async fn test_is_freed_flag() {
+    async fn test_lock_state_in_multiple_threads() {
         let (_containers, addresses) = create_clients();
         let rl = LockManager::new(addresses.clone());
 
@@ -792,13 +842,255 @@ mod tests {
             }
         });
         let _ = j.await;
-        assert!(lock1.is_freed());
+
+        match rl.is_freed(&lock1).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
 
         let lock2 = rl
             .lock(b"resource_2", std::time::Duration::from_millis(1000))
             .await
             .unwrap();
         rl.unlock(&lock2).await;
-        assert!(lock2.is_freed());
+
+        match rl.is_freed(&lock2).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_redis_value_matches_lock_value() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Ensure Redis key is correctly set and matches the lock value
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        let redis_val: Option<Vec<u8>> = redis::cmd("GET")
+            .arg(&lock.resource)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        eprintln!(
+            "Debug: Expected value in Redis: {:?}, Actual value in Redis: {:?}",
+            Some(lock.val.as_slice()),
+            redis_val.as_deref()
+        );
+
+        assert_eq!(
+            redis_val.as_deref(),
+            Some(lock.val.as_slice()),
+            "Redis value should match lock value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_not_freed_after_lock() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(!freed, "Lock should not be freed after it is acquired"),
+            Err(LockError::RedisKeyMismatch) => {
+                panic!("Redis key mismatch should not occur for a valid lock")
+            }
+            Err(LockError::RedisKeyNotFound) => {
+                panic!("Redis key not found should not occur for a valid lock")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_after_manual_unlock() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        rl.unlock(&lock).await;
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_when_key_missing_in_redis() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_3", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Manually delete the key in Redis to simulate it being missing
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        redis::cmd("DEL")
+            .arg(&lock.resource)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(
+                freed,
+                "Lock should be marked as freed when key is missing in Redis"
+            ),
+            Err(LockError::RedisKeyNotFound) => assert!(
+                true,
+                "RedisKeyNotFound is expected when key is missing in Redis"
+            ),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_handles_redis_connection_failure() {
+        let (_containers, _) = create_clients();
+        let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
+
+        let lock_result = rl
+            .lock(b"resource_4", std::time::Duration::from_millis(1000))
+            .await;
+
+        match lock_result {
+            Ok(lock) => {
+                // Since there are no clients, any check with Redis will fail
+                match rl.is_freed(&lock).await {
+                    Ok(freed) => panic!("Expected failure due to Redis connection, but got Ok with freed status: {}", freed),
+                    Err(LockError::RedisConnectionFailed) => assert!(true, "Expected RedisConnectionFailed when all Redis connections fail"),
+                    Err(e) => panic!("Unexpected error: {:?}", e),
+                }
+            }
+            Err(LockError::Unavailable) => {
+                // Expected error, the test should pass in this scenario
+                assert!(true);
+            }
+            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_connection_failed() {
+        let (_containers, _) = create_clients();
+        let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
+
+        let lock_result = rl
+            .lock(b"resource_5", std::time::Duration::from_millis(1000))
+            .await;
+
+        match lock_result {
+            Ok(lock) => match rl.is_freed(&lock).await {
+                Err(LockError::RedisConnectionFailed) => assert!(
+                    true,
+                    "Expected RedisConnectionFailed when all Redis connections fail"
+                ),
+                Ok(_) => panic!("Expected RedisConnectionFailed, but got Ok"),
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            },
+            Err(LockError::Unavailable) => {
+                // Expected error, the test should pass in this scenario
+                assert!(true);
+            }
+            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_key_mismatch() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_6", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Set a different value for the same key to simulate a mismatch
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        let different_value: Vec<u8> = vec![1, 2, 3, 4, 5]; // Different value
+        redis::cmd("SET")
+            .arg(&lock.resource)
+            .arg(different_value)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        // Now check if is_freed identifies the mismatch correctly
+        match rl.is_freed(&lock).await {
+            Err(LockError::RedisKeyMismatch) => assert!(
+                true,
+                "Expected RedisKeyMismatch when key value does not match the lock value"
+            ),
+            Ok(_) => panic!("Expected RedisKeyMismatch, but got Ok"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_key_not_found() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_7", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Manually delete the key in Redis to simulate it being missing
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        redis::cmd("DEL")
+            .arg(&lock.resource)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Err(LockError::RedisKeyNotFound) => assert!(
+                true,
+                "Expected RedisKeyNotFound when key is missing in Redis"
+            ),
+            Ok(_) => panic!("Expected RedisKeyNotFound, but got Ok"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
     }
 }
