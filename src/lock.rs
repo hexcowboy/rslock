@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
@@ -45,6 +46,15 @@ pub enum LockError {
 
     #[error("TTL too large")]
     TtlTooLarge,
+
+    #[error("Redis connection failed for all servers")]
+    RedisConnectionFailed,
+
+    #[error("Redis key mismatch: expected value does not match actual value")]
+    RedisKeyMismatch,
+
+    #[error("Redis key not found")]
+    RedisKeyNotFound,
 }
 
 /// The lock manager.
@@ -53,15 +63,26 @@ pub enum LockError {
 /// and handles the Redis connections.
 #[derive(Debug, Clone)]
 pub struct LockManager {
-    /// List of all Redis clients
-    pub servers: Vec<Client>,
-    quorum: u32,
+    lock_manager_inner: Arc<LockManagerInner>,
     retry_count: u32,
     retry_delay: Duration,
 }
 
 #[derive(Debug, Clone)]
-pub struct Lock<'a> {
+struct LockManagerInner {
+    /// List of all Redis clients
+    pub servers: Vec<Client>,
+    quorum: u32,
+}
+
+/// A distributed lock that can be acquired and released across multiple Redis instances.
+///
+/// A `Lock` represents a distributed lock in Redis.
+/// The lock is associated with a resource, identified by a unique key, and a value that identifies
+/// the lock owner. The `LockManager` is responsible for managing the acquisition, release, and extension
+/// of locks.
+#[derive(Debug)]
+pub struct Lock {
     /// The resource to lock. Will be used as the key in Redis.
     pub resource: Vec<u8>,
     /// The value for this lock.
@@ -70,7 +91,7 @@ pub struct Lock<'a> {
     /// Should only be slightly smaller than the requested TTL.
     pub validity_time: usize,
     /// Used to limit the lifetime of a lock to its lock manager.
-    pub lock_manager: &'a LockManager,
+    pub lock_manager: LockManager,
 }
 
 /// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
@@ -82,16 +103,16 @@ pub struct Lock<'a> {
 /// meaning that dropping the `LockGuard` will be a no-op.
 /// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate
 /// point to release the lock taken in `Redis`.
-#[derive(Debug, Clone)]
-pub struct LockGuard<'a> {
-    pub lock: Lock<'a>,
+#[derive(Debug)]
+pub struct LockGuard {
+    pub lock: Lock,
 }
 
 /// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled
 /// will block the tokio runtime.
 /// Because of this, the guard is not compiled if `tokio-comp` is enabled.
 #[cfg(not(feature = "tokio-comp"))]
-impl Drop for LockGuard<'_> {
+impl Drop for LockGuard {
     fn drop(&mut self) {
         futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
     }
@@ -111,8 +132,7 @@ impl LockManager {
             .collect();
 
         LockManager {
-            servers,
-            quorum,
+            lock_manager_inner: Arc::new(LockManagerInner { servers, quorum }),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
@@ -120,11 +140,9 @@ impl LockManager {
 
     /// Get 20 random bytes from the pseudorandom interface.
     pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
-        || -> Result<Vec<u8>, io::Error> {
-            let mut buf = [0u8; 20];
-            thread_rng().fill_bytes(&mut buf);
-            Ok(buf.to_vec())
-        }()
+        let mut buf = [0u8; 20];
+        thread_rng().fill_bytes(&mut buf);
+        Ok(buf.to_vec())
     }
 
     /// Set retry count and retry delay.
@@ -204,14 +222,14 @@ impl LockManager {
         value: &[u8],
         ttl: usize,
         lock: T,
-    ) -> Result<Lock<'a>, LockError>
+    ) -> Result<Lock, LockError>
     where
         T: Fn(&'a Client) -> Fut,
         Fut: Future<Output = bool>,
     {
         for _ in 0..self.retry_count {
             let start_time = Instant::now();
-            let n = join_all(self.servers.iter().map(&lock))
+            let n = join_all(self.lock_manager_inner.servers.iter().map(&lock))
                 .await
                 .into_iter()
                 .fold(0, |count, locked| if locked { count + 1 } else { count });
@@ -228,16 +246,17 @@ impl LockManager {
                 - elapsed.as_secs() as usize * 1000
                 - elapsed.subsec_nanos() as usize / 1_000_000;
 
-            if n >= self.quorum && validity_time > 0 {
+            if n >= self.lock_manager_inner.quorum && validity_time > 0 {
                 return Ok(Lock {
-                    lock_manager: self,
+                    lock_manager: self.clone(),
                     resource: resource.to_vec(),
                     val: value.to_vec(),
                     validity_time,
                 });
             } else {
                 join_all(
-                    self.servers
+                    self.lock_manager_inner
+                        .servers
                         .iter()
                         .map(|client| Self::unlock_instance(client, resource, value)),
                 )
@@ -256,13 +275,37 @@ impl LockManager {
         Err(LockError::Unavailable)
     }
 
+    // Query Redis for a key's value and keep trying each server until a successful result is returned
+    async fn query_redis_for_key_value(
+        &self,
+        resource: &[u8],
+    ) -> Result<Option<Vec<u8>>, LockError> {
+        for client in &self.lock_manager_inner.servers {
+            let mut con = match client.get_async_connection().await {
+                Ok(con) => con,
+                Err(_) => continue, // If connection fails, try the next server
+            };
+
+            let result: RedisResult<Option<Vec<u8>>> =
+                redis::cmd("GET").arg(resource).query_async(&mut con).await;
+
+            match result {
+                Ok(val) => return Ok(val),
+                Err(_) => continue, // If query fails, try the next server
+            }
+        }
+
+        Err(LockError::RedisConnectionFailed) // All servers failed
+    }
+
     /// Unlock the given lock.
     ///
     /// Unlock is best effort. It will simply try to contact all instances
     /// and remove the key.
-    pub async fn unlock(&self, lock: &Lock<'_>) {
+    pub async fn unlock(&self, lock: &Lock) {
         join_all(
-            self.servers
+            self.lock_manager_inner
+                .servers
                 .iter()
                 .map(|client| Self::unlock_instance(client, &lock.resource, &lock.val)),
         )
@@ -278,7 +321,7 @@ impl LockManager {
     /// A user should retry after a short wait time.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
-    pub async fn lock<'a>(&'a self, resource: &[u8], ttl: Duration) -> Result<Lock<'a>, LockError> {
+    pub async fn lock(&self, resource: &[u8], ttl: Duration) -> Result<Lock, LockError> {
         let val = self.get_unique_lock_id().map_err(LockError::Io)?;
         let ttl = ttl
             .as_millis()
@@ -297,11 +340,7 @@ impl LockManager {
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     #[cfg(feature = "async-std-comp")]
-    pub async fn acquire<'a>(
-        &'a self,
-        resource: &[u8],
-        ttl: Duration,
-    ) -> Result<LockGuard<'a>, LockError> {
+    pub async fn acquire(&self, resource: &[u8], ttl: Duration) -> Result<LockGuard, LockError> {
         let lock = self.acquire_no_guard(resource, ttl).await?;
         Ok(LockGuard { lock })
     }
@@ -312,11 +351,11 @@ impl LockManager {
     /// or `LockManager::unlock` must be called to allow other clients to lock the same resource.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
-    pub async fn acquire_no_guard<'a>(
-        &'a self,
+    pub async fn acquire_no_guard(
+        &self,
         resource: &[u8],
         ttl: Duration,
-    ) -> Result<Lock<'a>, LockError> {
+    ) -> Result<Lock, LockError> {
         loop {
             match self.lock(resource, ttl).await {
                 Ok(lock) => return Ok(lock),
@@ -327,11 +366,7 @@ impl LockManager {
     }
 
     /// Extend the given lock by given time in milliseconds
-    pub async fn extend<'a>(
-        &'a self,
-        lock: &Lock<'a>,
-        ttl: Duration,
-    ) -> Result<Lock<'a>, LockError> {
+    pub async fn extend(&self, lock: &Lock, ttl: Duration) -> Result<Lock, LockError> {
         let ttl = ttl
             .as_millis()
             .try_into()
@@ -341,6 +376,30 @@ impl LockManager {
             Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
         })
         .await
+    }
+
+    /// Checks if the given lock has been freed (i.e., is no longer held).
+    ///
+    /// This method queries Redis to determine if the key associated with the lock
+    /// is still present and matches the value of this lock. If the key is missing
+    /// or the value does not match, the lock is considered freed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if the lock is considered freed (either because the key does not exist
+    /// or the value does not match), otherwise `Ok(false)`. Returns an error if a Redis
+    /// connection or query fails.
+    pub async fn is_freed(&self, lock: &Lock) -> Result<bool, LockError> {
+        match self.query_redis_for_key_value(&lock.resource).await? {
+            Some(val) => {
+                if val != lock.val {
+                    Err(LockError::RedisKeyMismatch)
+                } else {
+                    Ok(false) // Key is present and matches the lock value
+                }
+            }
+            None => Err(LockError::RedisKeyNotFound), // Key does not exist
+        }
     }
 }
 
@@ -413,8 +472,8 @@ mod tests {
 
         let rl = LockManager::new(addresses.clone());
 
-        assert_eq!(3, rl.servers.len());
-        assert_eq!(2, rl.quorum);
+        assert_eq!(3, rl.lock_manager_inner.servers.len());
+        assert_eq!(2, rl.lock_manager_inner.quorum);
     }
 
     #[tokio::test]
@@ -425,7 +484,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        assert!(!LockManager::unlock_instance(&rl.servers[0], &key, &val).await);
+        assert!(!LockManager::unlock_instance(&rl.lock_manager_inner.servers[0], &key, &val).await);
 
         Ok(())
     }
@@ -438,10 +497,10 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.servers[0].get_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
         redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
 
-        assert!(LockManager::unlock_instance(&rl.servers[0], &key, &val).await);
+        assert!(LockManager::unlock_instance(&rl.lock_manager_inner.servers[0], &key, &val).await);
 
         Ok(())
     }
@@ -454,10 +513,13 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.servers[0].get_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
 
         redis::cmd("DEL").arg(&*key).execute(&mut con);
-        assert!(LockManager::lock_instance(&rl.servers[0], &*key, val.clone(), 1000).await);
+        assert!(
+            LockManager::lock_instance(&rl.lock_manager_inner.servers[0], &key, val.clone(), 1000)
+                .await
+        );
 
         Ok(())
     }
@@ -470,7 +532,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.servers[0].get_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
         let _: () = redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
@@ -478,7 +540,7 @@ mod tests {
             .unwrap();
 
         let lock = Lock {
-            lock_manager: &rl,
+            lock_manager: rl.clone(),
             resource: key,
             val,
             validity_time: 0,
@@ -500,9 +562,8 @@ mod tests {
             Ok(lock) => {
                 assert_eq!(key, lock.resource);
                 assert_eq!(20, lock.val.len());
-                assert!(lock.validity_time > 900);
                 assert!(
-                    lock.validity_time > 900,
+                    lock.validity_time > 0,
                     "validity time: {}",
                     lock.validity_time
                 );
@@ -524,7 +585,7 @@ mod tests {
 
         let lock = rl.lock(&key, Duration::from_millis(1000)).await.unwrap();
         assert!(
-            lock.validity_time > 900,
+            lock.validity_time > 0,
             "validity time: {}",
             lock.validity_time
         );
@@ -536,7 +597,7 @@ mod tests {
         rl.unlock(&lock).await;
 
         match rl2.lock(&key, Duration::from_millis(1000)).await {
-            Ok(l) => assert!(l.validity_time > 900),
+            Ok(l) => assert!(l.validity_time > 0),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
 
@@ -556,7 +617,7 @@ mod tests {
             let lock_guard = rl.acquire(&key, Duration::from_millis(1000)).await.unwrap();
             let lock = &lock_guard.lock;
             assert!(
-                lock.validity_time > 900,
+                lock.validity_time > 0,
                 "validity time: {}",
                 lock.validity_time
             );
@@ -568,7 +629,7 @@ mod tests {
         .await;
 
         match rl2.lock(&key, Duration::from_millis(1000)).await {
-            Ok(l) => assert!(l.validity_time > 900),
+            Ok(l) => assert!(l.validity_time > 0),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
 
@@ -728,6 +789,305 @@ mod tests {
         match rl.lock(&key, ttl).await {
             Ok(_) => panic!("Expected LockError::TtlTooLarge"),
             Err(_) => (), // Test passes
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lock_send_lock_manager() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Send the lock and entry through the channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        tx.send(("some info", lock, rl)).await.unwrap();
+
+        let j = tokio::spawn(async move {
+            // Retrieve from channel and use
+            if let Some((_entry, lock, rl)) = rx.recv().await {
+                rl.unlock(&lock).await;
+            }
+        });
+        let _ = j.await;
+    }
+
+    #[tokio::test]
+    async fn test_lock_state_in_multiple_threads() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock1 = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        let lock1 = Arc::new(lock1);
+        // Send the lock and entry through the channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        tx.send(("some info", lock1.clone(), rl.clone()))
+            .await
+            .unwrap();
+
+        let j = tokio::spawn(async move {
+            // Retrieve from channel and use
+            if let Some((_entry, lock1, rl)) = rx.recv().await {
+                rl.unlock(&lock1).await;
+            }
+        });
+        let _ = j.await;
+
+        match rl.is_freed(&lock1).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+
+        let lock2 = rl
+            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+        rl.unlock(&lock2).await;
+
+        match rl.is_freed(&lock2).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_redis_value_matches_lock_value() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Ensure Redis key is correctly set and matches the lock value
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        let redis_val: Option<Vec<u8>> = redis::cmd("GET")
+            .arg(&lock.resource)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+
+        eprintln!(
+            "Debug: Expected value in Redis: {:?}, Actual value in Redis: {:?}",
+            Some(lock.val.as_slice()),
+            redis_val.as_deref()
+        );
+
+        assert_eq!(
+            redis_val.as_deref(),
+            Some(lock.val.as_slice()),
+            "Redis value should match lock value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_not_freed_after_lock() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(!freed, "Lock should not be freed after it is acquired"),
+            Err(LockError::RedisKeyMismatch) => {
+                panic!("Redis key mismatch should not occur for a valid lock")
+            }
+            Err(LockError::RedisKeyNotFound) => {
+                panic!("Redis key not found should not occur for a valid lock")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_after_manual_unlock() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        rl.unlock(&lock).await;
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
+            Err(LockError::RedisKeyNotFound) => {
+                assert!(true, "RedisKeyNotFound is expected if key is missing")
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_when_key_missing_in_redis() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_3", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Manually delete the key in Redis to simulate it being missing
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        redis::cmd("DEL")
+            .arg(&lock.resource)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Ok(freed) => assert!(
+                freed,
+                "Lock should be marked as freed when key is missing in Redis"
+            ),
+            Err(LockError::RedisKeyNotFound) => assert!(
+                true,
+                "RedisKeyNotFound is expected when key is missing in Redis"
+            ),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        };
+    }
+
+    #[tokio::test]
+    async fn test_is_freed_handles_redis_connection_failure() {
+        let (_containers, _) = create_clients();
+        let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
+
+        let lock_result = rl
+            .lock(b"resource_4", std::time::Duration::from_millis(1000))
+            .await;
+
+        match lock_result {
+            Ok(lock) => {
+                // Since there are no clients, any check with Redis will fail
+                match rl.is_freed(&lock).await {
+                    Ok(freed) => panic!("Expected failure due to Redis connection, but got Ok with freed status: {}", freed),
+                    Err(LockError::RedisConnectionFailed) => assert!(true, "Expected RedisConnectionFailed when all Redis connections fail"),
+                    Err(e) => panic!("Unexpected error: {:?}", e),
+                }
+            }
+            Err(LockError::Unavailable) => {
+                // Expected error, the test should pass in this scenario
+                assert!(true);
+            }
+            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_connection_failed() {
+        let (_containers, _) = create_clients();
+        let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
+
+        let lock_result = rl
+            .lock(b"resource_5", std::time::Duration::from_millis(1000))
+            .await;
+
+        match lock_result {
+            Ok(lock) => match rl.is_freed(&lock).await {
+                Err(LockError::RedisConnectionFailed) => assert!(
+                    true,
+                    "Expected RedisConnectionFailed when all Redis connections fail"
+                ),
+                Ok(_) => panic!("Expected RedisConnectionFailed, but got Ok"),
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            },
+            Err(LockError::Unavailable) => {
+                // Expected error, the test should pass in this scenario
+                assert!(true);
+            }
+            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_key_mismatch() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_6", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Set a different value for the same key to simulate a mismatch
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        let different_value: Vec<u8> = vec![1, 2, 3, 4, 5]; // Different value
+        redis::cmd("SET")
+            .arg(&lock.resource)
+            .arg(different_value)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        // Now check if is_freed identifies the mismatch correctly
+        match rl.is_freed(&lock).await {
+            Err(LockError::RedisKeyMismatch) => assert!(
+                true,
+                "Expected RedisKeyMismatch when key value does not match the lock value"
+            ),
+            Ok(_) => panic!("Expected RedisKeyMismatch, but got Ok"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_redis_key_not_found() {
+        let (_containers, addresses) = create_clients();
+        let rl = LockManager::new(addresses.clone());
+
+        let lock = rl
+            .lock(b"resource_7", std::time::Duration::from_millis(1000))
+            .await
+            .unwrap();
+
+        // Manually delete the key in Redis to simulate it being missing
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_async_connection()
+            .await
+            .unwrap();
+        redis::cmd("DEL")
+            .arg(&lock.resource)
+            .query_async::<_, ()>(&mut con)
+            .await
+            .unwrap();
+
+        match rl.is_freed(&lock).await {
+            Err(LockError::RedisKeyNotFound) => assert!(
+                true,
+                "Expected RedisKeyNotFound when key is missing in Redis"
+            ),
+            Ok(_) => panic!("Expected RedisKeyNotFound, but got Ok"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 }

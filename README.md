@@ -5,6 +5,9 @@
 
 This is an implementation of Redlock, the [distributed locking mechanism](http://redis.io/topics/distlock) built on top of Redis.
 
+> [!WARNING]
+> Before release `1.0.0`, this crate will have breaking changes between minor versions. You can upgrade to patch versions without worrying about breaking changes.
+
 ## Features
 
 - Lock extending
@@ -75,6 +78,27 @@ Run tests with:
 
 ```
 cargo test
+```
+
+## Examples
+
+Start the redis servers mentioned in the example code:
+
+```bash
+docker compose -f examples/docker-compose.yml up -d
+```
+
+Run the examples:
+
+```bash
+cargo run --example basic
+cargo run --example shared_lock
+```
+
+Stop the redis servers:
+
+```bash
+docker compose -f examples/docker-compose.yml down
 ```
 
 ## Contribute
