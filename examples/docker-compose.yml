@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  redis1:
+    image: redis:7-alpine
+    container_name: redis1
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+
+  redis2:
+    image: redis:7-alpine
+    container_name: redis2
+    ports:
+      - "6381:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+
+  redis3:
+    image: redis:7-alpine
+    container_name: redis3
+    ports:
+      - "6382:6379"
+    command: ["redis-server", "--appendonly", "yes"]

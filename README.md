@@ -77,6 +77,21 @@ Run tests with:
 cargo test
 ```
 
+## Examples
+
+Start the redis servers mentioned in the example code:
+
+```bash
+docker compose up -d -f examples/docker-compose.yml
+```
+
+Run the examples:
+
+```bash
+cargo run --example basic
+cargo run --example shared_lock
+```
+
 ## Contribute
 
 If you find bugs or want to help otherwise, please [open an issue](https://github.com/hexcowboy/rslock/issues).
