@@ -120,19 +120,27 @@ impl Drop for LockGuard {
 
 impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis connection uris.
-    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
     pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
-        let quorum = (uris.len() as u32) / 2 + 1;
-
         let servers: Vec<Client> = uris
             .into_iter()
             .map(|uri| Client::open(uri).unwrap())
             .collect();
 
+        Self::from_clients(servers)
+    }
+
+    /// Create a new lock manager instance, defined by the given Redis clients.
+    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
+    pub fn from_clients(clients: Vec<Client>) -> LockManager {
+        let quorum = (clients.len() as u32) / 2 + 1;
+
         LockManager {
-            lock_manager_inner: Arc::new(LockManagerInner { servers, quorum }),
+            lock_manager_inner: Arc::new(LockManagerInner {
+                servers: clients,
+                quorum,
+            }),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
