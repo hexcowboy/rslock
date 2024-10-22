@@ -160,7 +160,7 @@ impl LockManager {
         val: Vec<u8>,
         ttl: usize,
     ) -> bool {
-        let mut con = match client.get_async_connection().await {
+        let mut con = match client.get_multiplexed_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -497,8 +497,12 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
-        redis::cmd("SET").arg(&*key).arg(&*val).execute(&mut con);
+        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection()?;
+        redis::cmd("SET")
+            .arg(&*key)
+            .arg(&*val)
+            .exec_async(&mut con)
+            .await?;
 
         assert!(LockManager::unlock_instance(&rl.lock_manager_inner.servers[0], &key, &val).await);
 
@@ -513,9 +517,9 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection()?;
 
-        redis::cmd("DEL").arg(&*key).execute(&mut con);
+        redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(
             LockManager::lock_instance(&rl.lock_manager_inner.servers[0], &key, val.clone(), 1000)
                 .await
@@ -957,7 +961,7 @@ mod tests {
             .unwrap();
         redis::cmd("DEL")
             .arg(&lock.resource)
-            .query_async::<_, ()>(&mut con)
+            .query_async::<()>(&mut con)
             .await
             .unwrap();
 
@@ -1045,7 +1049,7 @@ mod tests {
         redis::cmd("SET")
             .arg(&lock.resource)
             .arg(different_value)
-            .query_async::<_, ()>(&mut con)
+            .query_async::<()>(&mut con)
             .await
             .unwrap();
 
@@ -1077,7 +1081,7 @@ mod tests {
             .unwrap();
         redis::cmd("DEL")
             .arg(&lock.resource)
-            .query_async::<_, ()>(&mut con)
+            .query_async::<()>(&mut con)
             .await
             .unwrap();
 
