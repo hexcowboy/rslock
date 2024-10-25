@@ -124,13 +124,18 @@ impl LockManager {
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
     pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
-        let quorum = (uris.len() as u32) / 2 + 1;
-
         let servers: Vec<Client> = uris
             .into_iter()
             .map(|uri| Client::open(uri).unwrap())
             .collect();
+        
+        Self::with_servers(servers)
+    }
 
+    /// Create a new lock manager instance, defined by the given Redis connections vector.
+    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
+    pub fn with_servers(servers: Vec<Client>) -> LockManager {
+        let quorum = (servers.len() as u32) / 2 + 1;
         LockManager {
             lock_manager_inner: Arc::new(LockManagerInner { servers, quorum }),
             retry_count: DEFAULT_RETRY_COUNT,
