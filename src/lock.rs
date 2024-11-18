@@ -1173,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_manager_from_clients_valid_instance() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let clients: Vec<Client> = addresses
             .iter()
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_manager_from_clients_partial_quorum() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let mut clients: Vec<Client> = addresses
             .iter()
             .map(|uri| Client::open(uri.as_str()).unwrap())
