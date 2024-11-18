@@ -506,7 +506,9 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection().await?;
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_multiplexed_async_connection()
+            .await?;
         redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
@@ -526,7 +528,9 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection().await?;
+        let mut con = rl.lock_manager_inner.servers[0]
+            .get_multiplexed_async_connection()
+            .await?;
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(
