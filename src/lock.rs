@@ -737,6 +737,30 @@ mod tests {
                 lock.validity_time
             );
 
+            // Retry verifying the Redis key state up to 5 times with a 1000ms delay
+            let mut retries = 5;
+            let mut redis_key_verified = false;
+
+            while retries > 0 {
+                match rl1.query_redis_for_key_value(&key).await {
+                    Ok(Some(redis_val)) if redis_val == lock.val => {
+                        redis_key_verified = true;
+                        break;
+                    }
+                    Ok(Some(redis_val)) => {
+                        println!(
+                            "Redis key value mismatch. Expected: {:?}, Found: {:?}. Retrying...",
+                            lock.val, redis_val
+                        );
+                    }
+                    Ok(None) => println!("Redis key not found. Retrying..."),
+                    Err(e) => println!("Failed to query Redis key: {:?}. Retrying...", e),
+                }
+
+                retries -= 1;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+
             // Acquire lock2 and assert it can't be acquired
             if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
                 panic!("Lock acquired, even though it should be locked")
