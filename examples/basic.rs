@@ -1,5 +1,5 @@
-use std::time::Duration;
 use rslock::LockManager;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -36,4 +36,3 @@ async fn main() {
     rl.unlock(&lock).await;
     println!("Lock released!");
 }
-
