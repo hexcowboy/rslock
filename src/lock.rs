@@ -581,7 +581,7 @@ mod tests {
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(
-            LockManager::lock_instance(&rl.lock_manager_inner.servers[0], &key, val.clone(), 1000)
+            LockManager::lock_instance(&rl.lock_manager_inner.servers[0], &key, val.clone(), 10_000)
                 .await
         );
 
@@ -622,7 +622,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let key = rl.get_unique_lock_id()?;
-        match rl.lock(&key, Duration::from_millis(1000)).await {
+        match rl.lock(&key, Duration::from_millis(10_000)).await {
             Ok(lock) => {
                 assert_eq!(key, lock.resource);
                 assert_eq!(20, lock.val.len());
@@ -647,20 +647,20 @@ mod tests {
 
         let key = rl.get_unique_lock_id()?;
 
-        let lock = rl.lock(&key, Duration::from_millis(1000)).await.unwrap();
+        let lock = rl.lock(&key, Duration::from_millis(10_000)).await.unwrap();
         assert!(
             lock.validity_time > 0,
             "validity time: {}",
             lock.validity_time
         );
 
-        if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
+        if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
             panic!("Lock acquired, even though it should be locked")
         }
 
         rl.unlock(&lock).await;
 
-        match rl2.lock(&key, Duration::from_millis(1000)).await {
+        match rl2.lock(&key, Duration::from_millis(10_000)).await {
             Ok(l) => assert!(l.validity_time > 0),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
@@ -678,7 +678,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         async {
-            let lock_guard = rl.acquire(&key, Duration::from_millis(1000)).await.unwrap();
+            let lock_guard = rl.acquire(&key, Duration::from_millis(10_000)).await.unwrap();
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 0,
@@ -686,13 +686,13 @@ mod tests {
                 lock.validity_time
             );
 
-            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
+            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
         }
         .await;
 
-        match rl2.lock(&key, Duration::from_millis(1000)).await {
+        match rl2.lock(&key, Duration::from_millis(10_000)).await {
             Ok(l) => assert!(l.validity_time > 0),
             Err(_) => panic!("Lock couldn't be acquired"),
         }
@@ -722,13 +722,13 @@ mod tests {
             );
 
             // Acquire lock2 and assert it can't be acquired
-            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(1000)).await {
+            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
         }
         .await;
 
-        if let Ok(_) = rl2.lock(&key, Duration::from_millis(1000)).await {
+        if let Ok(_) = rl2.lock(&key, Duration::from_millis(10_000)).await {
             panic!("Lock couldn't be acquired");
         }
 
@@ -747,14 +747,14 @@ mod tests {
 
         async {
             let lock1 = rl1
-                .acquire(&key, Duration::from_millis(1000))
+                .acquire(&key, Duration::from_millis(10_000))
                 .await
                 .unwrap();
 
             // Wait half a second before locking again
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-            rl1.extend(&lock1.lock, Duration::from_millis(1000))
+            rl1.extend(&lock1.lock, Duration::from_millis(10_000))
                 .await
                 .unwrap();
 
@@ -762,7 +762,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
             // Assert lock2 can't access after extended lock
-            match rl2.lock(&key, Duration::from_millis(1000)).await {
+            match rl2.lock(&key, Duration::from_millis(10_000)).await {
                 Ok(_) => panic!("Expected an error when extending the lock but didn't receive one"),
                 Err(e) => match e {
                     LockError::Unavailable => (),
@@ -796,7 +796,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
             // Assert rl2 can lock with the key now
-            match rl2.lock(&key, Duration::from_millis(1000)).await {
+            match rl2.lock(&key, Duration::from_millis(10_000)).await {
                 Err(_) => {
                     panic!("Unexpected error when trying to claim free lock after extend expired")
                 }
@@ -804,7 +804,7 @@ mod tests {
             }
 
             // Also assert rl1 can't reuse lock1
-            match rl1.extend(&lock1.lock, Duration::from_millis(1000)).await {
+            match rl1.extend(&lock1.lock, Duration::from_millis(10_000)).await {
                 Ok(_) => panic!("Did not expect OK() when re-extending rl1"),
                 Err(e) => match e {
                     LockError::Unavailable => (),
@@ -862,7 +862,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource", std::time::Duration::from_millis(1000))
+            .lock(b"resource", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -885,7 +885,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock1 = rl
-            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .lock(b"resource_1", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -913,7 +913,7 @@ mod tests {
         };
 
         let lock2 = rl
-            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .lock(b"resource_2", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
         rl.unlock(&lock2).await;
@@ -933,7 +933,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .lock(b"resource_1", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -967,7 +967,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_1", std::time::Duration::from_millis(1000))
+            .lock(b"resource_1", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -989,7 +989,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_2", std::time::Duration::from_millis(1000))
+            .lock(b"resource_2", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -1010,7 +1010,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_3", std::time::Duration::from_millis(1000))
+            .lock(b"resource_3", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -1044,7 +1044,7 @@ mod tests {
         let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
 
         let lock_result = rl
-            .lock(b"resource_4", std::time::Duration::from_millis(1000))
+            .lock(b"resource_4", std::time::Duration::from_millis(10_000))
             .await;
 
         match lock_result {
@@ -1070,7 +1070,7 @@ mod tests {
         let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
 
         let lock_result = rl
-            .lock(b"resource_5", std::time::Duration::from_millis(1000))
+            .lock(b"resource_5", std::time::Duration::from_millis(10_000))
             .await;
 
         match lock_result {
@@ -1096,7 +1096,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_6", std::time::Duration::from_millis(1000))
+            .lock(b"resource_6", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
@@ -1130,7 +1130,7 @@ mod tests {
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
-            .lock(b"resource_7", std::time::Duration::from_millis(1000))
+            .lock(b"resource_7", std::time::Duration::from_millis(10_000))
             .await
             .unwrap();
 
