@@ -1,17 +1,23 @@
-use std::time::Duration;
+use redis::Client;
 use rslock::LockManager;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
-    // Define Redis URIs
+    // Create Redis clients
     let uris = vec![
         "redis://127.0.0.1:6380/",
         "redis://127.0.0.1:6381/",
         "redis://127.0.0.1:6382/",
     ];
 
-    // Initialize the LockManager using `new`
-    let rl = LockManager::new(uris);
+    let clients: Vec<Client> = uris
+        .iter()
+        .map(|uri| Client::open(*uri).expect("Failed to create Redis client"))
+        .collect();
+
+    // Initialize the LockManager using `from_clients`
+    let rl = LockManager::from_clients(clients);
 
     // Acquire a lock
     let lock = loop {
@@ -36,4 +42,3 @@ async fn main() {
     rl.unlock(&lock).await;
     println!("Lock released!");
 }
-
