@@ -439,7 +439,54 @@ mod tests {
             addresses.push(address);
         }
 
+        // Ensure all Redis instances are ready
+        ensure_redis_readiness(&addresses)
+            .await
+            .expect("Redis instances are not ready");
+
         (containers, addresses)
+    }
+
+    /// This function connects to each Redis instance and sends a `PING` command to verify its readiness.
+    /// If any Redis instance fails to respond, it retries up to 120 times with a 1000ms delay between attempts.
+    /// If readiness is not achieved after the retries, an error is returned.
+    ///
+    /// # Purpose
+    /// This function is particularly useful in CI environments and automated testing to ensure
+    /// that Redis containers or instances are fully initialized before running tests. This helps
+    /// prevent flaky tests caused by race conditions where Redis is not yet ready.
+    async fn ensure_redis_readiness(
+        addresses: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for address in addresses {
+            let client = Client::open(address.as_str())?;
+            let mut retries = 120;
+
+            while retries > 0 {
+                match client.get_multiplexed_async_connection().await {
+                    Ok(mut con) => match redis::cmd("PING").query_async::<String>(&mut con).await {
+                        Ok(response) => {
+                            eprintln!("Redis {} is ready: {}", address, response);
+                            break; // Move to the next address
+                        }
+                        Err(e) => {
+                            eprintln!("Redis {} is not ready: {:?}", address, e);
+                        }
+                    },
+                    Err(e) => eprintln!("Failed to connect to Redis {}: {:?}", address, e),
+                }
+
+                // Decrement retries and wait before the next attempt
+                retries -= 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+
+            if retries == 0 {
+                return Err(format!("Redis {} did not become ready after retries", address).into());
+            }
+        }
+
+        Ok(())
     }
 
     fn is_normal<T: Sized + Send + Sync + Unpin>() {}
