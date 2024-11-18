@@ -1098,4 +1098,36 @@ mod tests {
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
+
+    #[tokio::test]
+    async fn test_lock_manager_from_clients_valid_instance() {
+        let (_containers, addresses) = create_clients();
+
+        let clients: Vec<Client> = addresses
+            .iter()
+            .map(|uri| Client::open(uri.as_str()).unwrap())
+            .collect();
+
+        let lock_manager = LockManager::from_clients(clients);
+
+        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 3);
+        assert_eq!(lock_manager.lock_manager_inner.quorum, 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_manager_from_clients_partial_quorum() {
+        let (_containers, addresses) = create_clients();
+        let mut clients: Vec<Client> = addresses
+            .iter()
+            .map(|uri| Client::open(uri.as_str()).unwrap())
+            .collect();
+
+        // Remove one client to simulate fewer nodes
+        clients.pop();
+
+        let lock_manager = LockManager::from_clients(clients);
+
+        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 2);
+        assert_eq!(lock_manager.lock_manager_inner.quorum, 2); // 2/2+1 still rounds to 2
+    }
 }
