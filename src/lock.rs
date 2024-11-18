@@ -185,7 +185,7 @@ impl LockManager {
         val: &[u8],
         ttl: usize,
     ) -> bool {
-        let mut con = match client.get_async_connection().await {
+        let mut con = match client.get_multiplexed_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -203,7 +203,7 @@ impl LockManager {
     }
 
     async fn unlock_instance(client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = match client.get_async_connection().await {
+        let mut con = match client.get_multiplexed_async_connection().await {
             Err(_) => return false,
             Ok(val) => val,
         };
@@ -281,7 +281,7 @@ impl LockManager {
         resource: &[u8],
     ) -> Result<Option<Vec<u8>>, LockError> {
         for client in &self.lock_manager_inner.servers {
-            let mut con = match client.get_async_connection().await {
+            let mut con = match client.get_multiplexed_async_connection().await {
                 Ok(con) => con,
                 Err(_) => continue, // If connection fails, try the next server
             };
@@ -406,34 +406,43 @@ impl LockManager {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use once_cell::sync::Lazy;
-    use testcontainers::clients::Cli;
-    use testcontainers::images::redis::Redis;
-    use testcontainers::{Container, RunnableImage};
+    use testcontainers::{
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
+        ContainerAsync, GenericImage,
+    };
+    use tokio::time::Duration;
 
     use super::*;
 
-    type Containers = Vec<Container<'static, Redis>>;
+    type Containers = Vec<ContainerAsync<GenericImage>>;
 
-    static DOCKER: Lazy<Cli> = Lazy::new(Cli::docker);
+    async fn create_clients() -> (Containers, Vec<String>) {
+        let mut containers = Vec::new();
+        let mut addresses = Vec::new();
 
-    fn is_normal<T: Sized + Send + Sync + Unpin>() {}
+        for _ in 1..=3 {
+            let container = GenericImage::new("redis", "7")
+                .with_exposed_port(6379.tcp())
+                .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                .start()
+                .await
+                .expect("Failed to start Redis container");
 
-    fn create_clients() -> (Containers, Vec<String>) {
-        let containers: Containers = (1..=3)
-            .map(|_| {
-                let image = RunnableImage::from(Redis::default()).with_tag("7-alpine");
-                DOCKER.run(image)
-            })
-            .collect();
+            let port = container
+                .get_host_port_ipv4(6379)
+                .await
+                .expect("Failed to get port");
+            let address = format!("redis://localhost:{}", port);
 
-        let addresses = containers
-            .iter()
-            .map(|node| format!("redis://localhost:{}", node.get_host_port_ipv4(6379)))
-            .collect();
+            containers.push(container);
+            addresses.push(address);
+        }
 
         (containers, addresses)
     }
+
+    fn is_normal<T: Sized + Send + Sync + Unpin>() {}
 
     // Test that the LockManager is Send + Sync
     #[test]
@@ -468,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_valid_instance() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
 
@@ -478,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_direct_unlock_fails() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
@@ -491,13 +500,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_direct_unlock_succeeds() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection().await?;
         redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
@@ -511,13 +520,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_direct_lock_succeeds() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection()?;
+        let mut con = rl.lock_manager_inner.servers[0].get_multiplexed_async_connection().await?;
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(
@@ -530,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_unlock() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
@@ -557,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_lock() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
 
@@ -580,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_lock_unlock() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
@@ -611,7 +620,7 @@ mod tests {
     #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
@@ -643,7 +652,7 @@ mod tests {
     #[cfg(feature = "tokio-comp")]
     #[tokio::test]
     async fn test_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl1 = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
@@ -678,7 +687,7 @@ mod tests {
     #[cfg(feature = "async-std-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl1 = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
@@ -718,7 +727,7 @@ mod tests {
     #[cfg(feature = "async-std-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock_releases() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let rl1 = LockManager::new(addresses.clone());
         let rl2 = LockManager::new(addresses.clone());
@@ -759,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_with_short_ttl_and_retries() -> Result<()> {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
 
         let mut rl = LockManager::new(addresses.clone());
         // Set a high retry count to ensure retries happen
@@ -784,7 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_ttl_duration_conversion_error() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id().unwrap();
 
@@ -798,7 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_send_lock_manager() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -821,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_state_in_multiple_threads() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock1 = rl
@@ -869,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_value_matches_lock_value() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -879,7 +888,7 @@ mod tests {
 
         // Ensure Redis key is correctly set and matches the lock value
         let mut con = rl.lock_manager_inner.servers[0]
-            .get_async_connection()
+            .get_multiplexed_async_connection()
             .await
             .unwrap();
         let redis_val: Option<Vec<u8>> = redis::cmd("GET")
@@ -903,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_not_freed_after_lock() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -925,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_freed_after_manual_unlock() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -946,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_freed_when_key_missing_in_redis() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -956,7 +965,7 @@ mod tests {
 
         // Manually delete the key in Redis to simulate it being missing
         let mut con = rl.lock_manager_inner.servers[0]
-            .get_async_connection()
+            .get_multiplexed_async_connection()
             .await
             .unwrap();
         redis::cmd("DEL")
@@ -980,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_freed_handles_redis_connection_failure() {
-        let (_containers, _) = create_clients();
+        let (_containers, _) = create_clients().await;
         let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
 
         let lock_result = rl
@@ -1006,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_connection_failed() {
-        let (_containers, _) = create_clients();
+        let (_containers, _) = create_clients().await;
         let rl = LockManager::new(Vec::<String>::new()); // No Redis clients, simulate failure
 
         let lock_result = rl
@@ -1032,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_key_mismatch() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -1042,7 +1051,7 @@ mod tests {
 
         // Set a different value for the same key to simulate a mismatch
         let mut con = rl.lock_manager_inner.servers[0]
-            .get_async_connection()
+            .get_multiplexed_async_connection()
             .await
             .unwrap();
         let different_value: Vec<u8> = vec![1, 2, 3, 4, 5]; // Different value
@@ -1066,7 +1075,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_key_not_found() {
-        let (_containers, addresses) = create_clients();
+        let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
 
         let lock = rl
@@ -1076,7 +1085,7 @@ mod tests {
 
         // Manually delete the key in Redis to simulate it being missing
         let mut con = rl.lock_manager_inner.servers[0]
-            .get_async_connection()
+            .get_multiplexed_async_connection()
             .await
             .unwrap();
         redis::cmd("DEL")
