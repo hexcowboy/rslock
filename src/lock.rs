@@ -581,8 +581,13 @@ mod tests {
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(
-            LockManager::lock_instance(&rl.lock_manager_inner.servers[0], &key, val.clone(), 10_000)
-                .await
+            LockManager::lock_instance(
+                &rl.lock_manager_inner.servers[0],
+                &key,
+                val.clone(),
+                10_000
+            )
+            .await
         );
 
         Ok(())
@@ -678,7 +683,10 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         async {
-            let lock_guard = rl.acquire(&key, Duration::from_millis(10_000)).await.unwrap();
+            let lock_guard = rl
+                .acquire(&key, Duration::from_millis(10_000))
+                .await
+                .unwrap();
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 0,
