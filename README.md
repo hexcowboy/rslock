@@ -32,40 +32,44 @@ cargo build --release
 ## Usage
 
 ```rust
-use std::time::Duration;
-
 use rslock::LockManager;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
-    let rl = LockManager::new(vec![
+    // Define Redis URIs
+    let uris = vec![
         "redis://127.0.0.1:6380/",
         "redis://127.0.0.1:6381/",
         "redis://127.0.0.1:6382/",
-    ]);
+    ];
 
-    let lock;
-    loop {
-        // Create the lock
-        if let Ok(l) = rl
+    // Initialize the LockManager using `new`
+    let rl = LockManager::new(uris);
+
+    // Acquire a lock
+    let lock = loop {
+        if let Ok(lock) = rl
             .lock("mutex".as_bytes(), Duration::from_millis(1000))
             .await
         {
-            lock = l;
-            break;
+            break lock;
         }
-    }
+    };
+
+    println!("Lock acquired!");
 
     // Extend the lock
-    match rl.extend(&lock, Duration::from_millis(1000)).await {
-        Ok(_) => println!("lock extended!"),
-        Err(_) => println!("lock couldn't be extended"),
+    if rl.extend(&lock, Duration::from_millis(1000)).await.is_ok() {
+        println!("Lock extended!");
+    } else {
+        println!("Failed to extend the lock.");
     }
 
     // Unlock the lock
     rl.unlock(&lock).await;
+    println!("Lock released!");
 }
-
 ```
 
 ## Extending Locks
@@ -93,6 +97,7 @@ Run the examples:
 ```bash
 cargo run --example basic
 cargo run --example shared_lock
+cargo run --example from_clients
 ```
 
 Stop the redis servers:
