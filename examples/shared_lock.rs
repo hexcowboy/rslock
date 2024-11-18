@@ -5,67 +5,83 @@ use tokio::task;
 
 use rslock::{Lock, LockManager};
 
-// This example demonstrates how to use a shared lock in a multi-threaded environment.
-
+// Demonstrates using a shared lock in a multi-threaded environment.
 #[tokio::main]
 async fn main() {
     // Create a shared LockManager with multiple Redis instances
-    let rl = Arc::new(LockManager::new(vec![
+    let uris = vec![
         "redis://127.0.0.1:6380/",
         "redis://127.0.0.1:6381/",
         "redis://127.0.0.1:6382/",
-    ]));
+    ];
+    let lock_manager = Arc::new(LockManager::new(uris));
 
-    // Create a channel to communicate between threads
+    // Create a channel to communicate between tasks
     let (tx, mut rx) = mpsc::channel::<Arc<Lock>>(1);
 
-    // Spawn a task to acquire a lock and send it to another task
-    let rl_clone = rl.clone();
-    let sender_task = task::spawn(async move {
-        let lock;
-        loop {
-            // Attempt to acquire the lock
-            if let Ok(l) = rl_clone
-                .lock("shared_mutex".as_bytes(), Duration::from_millis(2000))
-                .await
-            {
-                lock = Arc::new(l);
-                break;
+    // Task to acquire a lock and send it to the receiver task
+    let sender = {
+        let lock_manager = Arc::clone(&lock_manager);
+        task::spawn(async move {
+            // Acquire the lock
+            let lock = loop {
+                match lock_manager
+                    .lock("shared_mutex".as_bytes(), Duration::from_millis(2000))
+                    .await
+                {
+                    Ok(lock) => break Arc::new(lock),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await, // Retry after a short delay
+                }
+            };
+
+            println!("Sender: Lock acquired.");
+
+            // Send the lock to the receiver
+            if tx.send(lock.clone()).await.is_err() {
+                println!("Sender: Failed to send the lock.");
+                return;
             }
-        }
-        println!("Lock acquired by sender task.");
 
-        // Send the lock to the receiver task
-        tx.send(lock.clone()).await.unwrap();
-
-        // Extend the lock
-        match rl_clone.extend(&lock, Duration::from_millis(2000)).await {
-            Ok(_) => println!("Lock extended by sender task!"),
-            Err(_) => println!("Sender task couldn't extend the lock"),
-        }
-    });
-
-    // Spawn a task to receive the lock and release it
-    let receiver_task = task::spawn(async move {
-        if let Some(lock) = rx.recv().await {
-            println!("Lock received by receiver task.");
+            println!("Sender: Lock sent.");
 
             // Extend the lock
-            match lock
+            if lock_manager
+                .extend(&lock, Duration::from_millis(2000))
+                .await
+                .is_ok()
+            {
+                println!("Sender: Lock extended.");
+            } else {
+                println!("Sender: Failed to extend the lock.");
+            }
+        })
+    };
+
+    // Task to receive the lock and release it
+    let receiver = task::spawn(async move {
+        if let Some(lock) = rx.recv().await {
+            println!("Receiver: Lock received.");
+
+            // Extend the lock
+            if lock
                 .lock_manager
                 .extend(&lock, Duration::from_millis(1000))
                 .await
+                .is_ok()
             {
-                Ok(_) => println!("Lock extended by receiver task!"),
-                Err(_) => println!("Receiver task couldn't extend the lock"),
+                println!("Receiver: Lock extended.");
+            } else {
+                println!("Receiver: Failed to extend the lock.");
             }
 
-            // Unlock the lock
+            // Release the lock
             lock.lock_manager.unlock(&lock).await;
-            println!("Lock released by receiver task.");
+            println!("Receiver: Lock released.");
+        } else {
+            println!("Receiver: No lock received.");
         }
     });
 
     // Wait for both tasks to complete
-    let _ = tokio::join!(sender_task, receiver_task);
+    let _ = tokio::join!(sender, receiver);
 }

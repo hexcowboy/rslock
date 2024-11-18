@@ -120,19 +120,27 @@ impl Drop for LockGuard {
 
 impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis connection uris.
-    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
     pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
-        let quorum = (uris.len() as u32) / 2 + 1;
-
         let servers: Vec<Client> = uris
             .into_iter()
             .map(|uri| Client::open(uri).unwrap())
             .collect();
 
+        Self::from_clients(servers)
+    }
+
+    /// Create a new lock manager instance, defined by the given Redis clients.
+    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
+    pub fn from_clients(clients: Vec<Client>) -> LockManager {
+        let quorum = (clients.len() as u32) / 2 + 1;
+
         LockManager {
-            lock_manager_inner: Arc::new(LockManagerInner { servers, quorum }),
+            lock_manager_inner: Arc::new(LockManagerInner {
+                servers: clients,
+                quorum,
+            }),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
@@ -729,6 +737,30 @@ mod tests {
                 lock.validity_time
             );
 
+            // Retry verifying the Redis key state up to 5 times with a 1000ms delay
+            let mut retries = 5;
+            let mut redis_key_verified = false;
+
+            while retries > 0 {
+                match rl1.query_redis_for_key_value(&key).await {
+                    Ok(Some(redis_val)) if redis_val == lock.val => {
+                        redis_key_verified = true;
+                        break;
+                    }
+                    Ok(Some(redis_val)) => {
+                        println!(
+                            "Redis key value mismatch. Expected: {:?}, Found: {:?}. Retrying...",
+                            lock.val, redis_val
+                        );
+                    }
+                    Ok(None) => println!("Redis key not found. Retrying..."),
+                    Err(e) => println!("Failed to query Redis key: {:?}. Retrying...", e),
+                }
+
+                retries -= 1;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+
             // Acquire lock2 and assert it can't be acquired
             if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
                 panic!("Lock acquired, even though it should be locked")
@@ -1161,5 +1193,37 @@ mod tests {
             Ok(_) => panic!("Expected RedisKeyNotFound, but got Ok"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    #[tokio::test]
+    async fn test_lock_manager_from_clients_valid_instance() {
+        let (_containers, addresses) = create_clients().await;
+
+        let clients: Vec<Client> = addresses
+            .iter()
+            .map(|uri| Client::open(uri.as_str()).unwrap())
+            .collect();
+
+        let lock_manager = LockManager::from_clients(clients);
+
+        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 3);
+        assert_eq!(lock_manager.lock_manager_inner.quorum, 2);
+    }
+
+    #[tokio::test]
+    async fn test_lock_manager_from_clients_partial_quorum() {
+        let (_containers, addresses) = create_clients().await;
+        let mut clients: Vec<Client> = addresses
+            .iter()
+            .map(|uri| Client::open(uri.as_str()).unwrap())
+            .collect();
+
+        // Remove one client to simulate fewer nodes
+        clients.pop();
+
+        let lock_manager = LockManager::from_clients(clients);
+
+        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 2);
+        assert_eq!(lock_manager.lock_manager_inner.quorum, 2); // 2/2+1 still rounds to 2
     }
 }
