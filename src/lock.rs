@@ -155,7 +155,7 @@ impl LockManager {
 
     /// Set total number of tries and maximum retry delay.
     /// 
-    /// Retries will be delayed by a random amount of time between `0` and `retry_delay`.
+    /// Retries will be delayed by a random amount of time between `0` and `delay`.
     ///
     /// Try count defaults to `3`.
     /// Retry delay defaults to `200 ms`.
@@ -337,10 +337,11 @@ impl LockManager {
     /// Acquire the lock for the given resource and the requested TTL.
     ///
     /// If it succeeds, a `Lock` instance is returned,
-    /// including the value and the validity time
+    /// including the value and the validity time.
     ///
-    /// If it fails. `None` is returned.
+    /// If it fails, `LockError::Unavailable` is returned.
     /// A user should retry after a short wait time.
+    /// See `LockManger::set_retry_policy` for automatic retries.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     pub async fn lock(&self, resource: &[u8], ttl: Duration) -> Result<Lock, LockError> {
