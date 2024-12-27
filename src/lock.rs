@@ -64,7 +64,7 @@ pub enum LockError {
 #[derive(Debug, Clone)]
 pub struct LockManager {
     lock_manager_inner: Arc<LockManagerInner>,
-    retry_count: u32,
+    try_count: u32,
     retry_delay: Duration,
 }
 
@@ -141,7 +141,7 @@ impl LockManager {
                 servers: clients,
                 quorum,
             }),
-            retry_count: DEFAULT_RETRY_COUNT,
+            try_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
     }
@@ -153,13 +153,18 @@ impl LockManager {
         Ok(buf.to_vec())
     }
 
-    /// Set retry count and retry delay.
+    /// Set total number of tries and retry delay.
     ///
-    /// Retry count defaults to `3`.
-    /// Retry delay defaults to `200`.
-    pub fn set_retry(&mut self, count: u32, delay: Duration) {
-        self.retry_count = count;
+    /// Try count defaults to `3`.
+    /// Retry delay defaults to `200 ms`.
+    pub fn set_retry_policy(&mut self, count: u32, delay: Duration) {
+        self.try_count = count;
         self.retry_delay = delay;
+    }
+
+    #[deprecated(note = "Please use `set_retry_policy` instead")]
+    pub fn set_retry(&mut self, count: u32, delay: Duration) {
+        self.set_retry_policy(count, delay);
     }
 
     async fn lock_instance(
@@ -235,7 +240,7 @@ impl LockManager {
         T: Fn(&'a Client) -> Fut,
         Fut: Future<Output = bool>,
     {
-        for _ in 0..self.retry_count {
+        for _ in 0..self.try_count {
             let start_time = Instant::now();
             let n = join_all(self.lock_manager_inner.servers.iter().map(&lock))
                 .await
@@ -863,7 +868,7 @@ mod tests {
 
         let mut rl = LockManager::new(addresses.clone());
         // Set a high retry count to ensure retries happen
-        rl.set_retry(10, Duration::from_millis(10)); // Retry 10 times with 10 milliseconds delay
+        rl.set_retry_policy(10, Duration::from_millis(10)); // Retry 10 times with 10 milliseconds delay
 
         let key = rl.get_unique_lock_id()?;
 
