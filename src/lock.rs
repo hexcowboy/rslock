@@ -153,7 +153,9 @@ impl LockManager {
         Ok(buf.to_vec())
     }
 
-    /// Set total number of tries and retry delay.
+    /// Set total number of tries and maximum retry delay.
+    /// 
+    /// Retries will be delayed by a random amount of time between `0` and `retry_delay`.
     ///
     /// Try count defaults to `3`.
     /// Retry delay defaults to `200 ms`.
@@ -240,7 +242,9 @@ impl LockManager {
         T: Fn(&'a Client) -> Fut,
         Fut: Future<Output = bool>,
     {
-        for _ in 0..self.try_count {
+        let mut current_try = 1;
+
+        loop {
             let start_time = Instant::now();
             let n = join_all(self.lock_manager_inner.servers.iter().map(&lock))
                 .await
@@ -276,13 +280,18 @@ impl LockManager {
                 .await;
             }
 
-            let retry_delay: u64 = self
-                .retry_delay
-                .as_millis()
-                .try_into()
-                .map_err(|_| LockError::TtlTooLarge)?;
-            let n = thread_rng().gen_range(0..retry_delay);
-            tokio::time::sleep(Duration::from_millis(n)).await
+            if current_try < self.try_count {
+                current_try += 1;
+                let retry_delay: u64 = self
+                    .retry_delay
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| LockError::TtlTooLarge)?;
+                let n = thread_rng().gen_range(0..retry_delay);
+                tokio::time::sleep(Duration::from_millis(n)).await
+            } else {
+                break;
+            }
         }
 
         Err(LockError::Unavailable)
