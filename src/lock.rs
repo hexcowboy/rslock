@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use futures::Future;
 use rand::{thread_rng, Rng, RngCore};
+use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
-use redis::{Client, IntoConnectionInfo, RedisResult, Value};
+use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
 
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -55,7 +55,19 @@ pub enum LockError {
 
     #[error("Redis key not found")]
     RedisKeyNotFound,
+    #[error("A mutex was poisoned")]
+    MutexPoisoned,
 }
+
+#[cfg(not(feature = "tokio-comp"))]
+type Mutex<T> = std::sync::Mutex<T>;
+#[cfg(not(feature = "tokio-comp"))]
+type MutexGuard<'a, K> = std::sync::MutexGuard<'a, K>;
+
+#[cfg(feature = "tokio-comp")]
+type Mutex<T> = tokio::sync::Mutex<T>;
+#[cfg(feature = "tokio-comp")]
+type MutexGuard<'a, K> = tokio::sync::MutexGuard<'a, K>;
 
 /// The lock manager.
 ///
@@ -63,7 +75,7 @@ pub enum LockError {
 /// and handles the Redis connections.
 #[derive(Debug, Clone)]
 pub struct LockManager {
-    lock_manager_inner: Arc<LockManagerInner>,
+    lock_manager_inner: Arc<Mutex<LockManagerInner>>,
     retry_count: u32,
     retry_delay: Duration,
 }
@@ -71,8 +83,177 @@ pub struct LockManager {
 #[derive(Debug, Clone)]
 struct LockManagerInner {
     /// List of all Redis clients
-    pub servers: Vec<Client>,
-    quorum: u32,
+    pub servers: Vec<RestorableConnection>,
+}
+
+impl LockManagerInner {
+    fn get_quorum(&self) -> u32 {
+        (self.servers.len() as u32) / 2 + 1
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(feature = "tokio-comp"))]
+struct RestorableConnection {
+    client: Client,
+    pub con: Arc<Mutex<Option<MultiplexedConnection>>>
+}
+
+
+#[cfg(not(feature = "tokio-comp"))]
+impl RestorableConnection {
+    pub fn new(client: Client) -> Self {
+        //TODO: Is error handling appropriate here??
+        Self {
+            client,
+            con: Arc::new( Mutex::new( None ))
+        }
+    }
+
+    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
+        let lock = self.con.lock();
+        if lock.is_err() {
+            return Err(LockError::MutexPoisoned);
+        }
+        let mut lock = lock.unwrap();
+        if lock.is_none() {
+            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+        }
+        let conn = (*lock).clone().unwrap();
+        return Ok(conn);
+    }
+
+
+    pub async fn recover(&mut self, error: RedisError) -> Result<(), LockError> {
+        //We need to rebuild the connection
+        if !error.is_unrecoverable_error() {
+            return Ok(());
+        }
+        else {
+            let lock = self.con.lock();
+            if lock.is_err() {
+                return Err(LockError::MutexPoisoned);
+            }
+
+            let mut lock = lock.unwrap();
+            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+            return Ok(());
+        }
+        
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "tokio-comp")]
+struct RestorableConnection {
+    client: Client,
+    con: Arc<Mutex<Option<MultiplexedConnection>>>
+}
+
+#[cfg(feature = "tokio-comp")]
+impl RestorableConnection {
+    pub fn new(client: Client) -> Self {
+        //TODO: Is error handling appropriate here??
+        Self {
+            client,
+            con: Arc::new( tokio::sync::Mutex::new( None ))
+        }
+    }
+
+    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
+        let mut lock = self.con.lock().await;
+        if lock.is_none() {
+            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+        }
+        let conn = (*lock).clone().unwrap();
+        return Ok(conn);
+    }
+
+    pub async fn recover(&mut self, error: RedisError) -> Result<(), LockError> {
+        //We need to rebuild the connection
+        if !error.is_unrecoverable_error() {
+            return Ok(());
+        }
+        else {
+            let mut lock = self.con.lock().await;
+            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+            return Ok(());
+        }
+    }
+}
+
+impl RestorableConnection {
+    async fn lock(&mut self, resource: &[u8], val: &[u8], ttl: usize) -> bool {
+        let mut con = match self.get_connection().await {
+            Err(_) => return false,
+            Ok(val) => val,
+        };
+
+        let result: RedisResult<Value> = redis::cmd("SET")
+            .arg(resource)
+            .arg(val)
+            .arg("NX")
+            .arg("PX")
+            .arg(ttl)
+            .query_async(&mut con)
+            .await;
+
+        match result {
+            Ok(Okay) => true,
+            Ok(_) => false,
+            Err(e) => {
+                self.recover(e).await;
+                false
+            }
+        }
+    }
+
+    async fn extend(&mut self, resource: &[u8], val: &[u8], ttl: usize) -> bool {
+        let mut con = match self.get_connection().await {
+            Err(_) => return false,
+            Ok(val) => val,
+        };
+        let script = redis::Script::new(EXTEND_SCRIPT);
+        let result: RedisResult<i32> = script
+            .key(resource)
+            .arg(val)
+            .arg(ttl)
+            .invoke_async(&mut con)
+            .await;
+        match result {
+            Ok(val) => val == 1,
+            Err(e) => {
+                self.recover(e).await;
+                false
+            },
+        }
+    }
+
+    async fn unlock(&mut self, resource: &[u8], val: &[u8]) -> bool {
+        let mut con = match self.get_connection().await {
+            Err(_) => return false,
+            Ok(val) => val,
+        };
+        let script = redis::Script::new(UNLOCK_SCRIPT);
+        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(&mut con).await;
+        match result {
+            Ok(val) => val == 1,
+            Err(e) => {
+                self.recover(e).await;
+                false
+            },
+        }
+    }
+
+    async fn query(&mut self, resource: &[u8]) -> RedisResult<Option<Vec<u8>>> {
+        let mut con = match self.get_connection().await {
+            Ok(con) => con,
+            Err(e) => return Ok(None),
+        };
+        let result: RedisResult<Option<Vec<u8>>> =
+                redis::cmd("GET").arg(resource).query_async(&mut con).await;
+        result
+    }
 }
 
 /// A distributed lock that can be acquired and released across multiple Redis instances.
@@ -108,6 +289,11 @@ pub struct LockGuard {
     pub lock: Lock,
 }
 
+enum Operation {
+    Lock,
+    Extend
+}
+
 /// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled
 /// will block the tokio runtime.
 /// Because of this, the guard is not compiled if `tokio-comp` is enabled.
@@ -125,7 +311,7 @@ impl LockManager {
     pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
         let servers: Vec<Client> = uris
             .into_iter()
-            .map(|uri| Client::open(uri).unwrap())
+            .map(|uri|  Client::open(uri).unwrap() )
             .collect();
 
         Self::from_clients(servers)
@@ -134,13 +320,11 @@ impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis clients.
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     pub fn from_clients(clients: Vec<Client>) -> LockManager {
-        let quorum = (clients.len() as u32) / 2 + 1;
-
+        let clients : Vec<RestorableConnection> = clients.into_iter().map(|x| RestorableConnection::new(x)).collect();
         LockManager {
-            lock_manager_inner: Arc::new(LockManagerInner {
-                servers: clients,
-                quorum,
-            }),
+            lock_manager_inner: Arc::new(Mutex::new( LockManagerInner {
+                servers: clients
+            })),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
@@ -162,85 +346,39 @@ impl LockManager {
         self.retry_delay = delay;
     }
 
-    async fn lock_instance(
-        client: &redis::Client,
-        resource: &[u8],
-        val: Vec<u8>,
-        ttl: usize,
-    ) -> bool {
-        let mut con = match client.get_multiplexed_async_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
-        };
-        let result: RedisResult<Value> = redis::cmd("SET")
-            .arg(resource)
-            .arg(val)
-            .arg("NX")
-            .arg("PX")
-            .arg(ttl)
-            .query_async(&mut con)
-            .await;
-
-        match result {
-            Ok(Okay) => true,
-            Ok(_) | Err(_) => false,
-        }
+    #[cfg(not(feature = "tokio-comp"))]
+    async fn lock_inner(&self) -> MutexGuard<'_, LockManagerInner>{
+        self.lock_manager_inner.lock().unwrap()
     }
 
-    async fn extend_lock_instance(
-        client: &redis::Client,
-        resource: &[u8],
-        val: &[u8],
-        ttl: usize,
-    ) -> bool {
-        let mut con = match client.get_multiplexed_async_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
-        };
-        let script = redis::Script::new(EXTEND_SCRIPT);
-        let result: RedisResult<i32> = script
-            .key(resource)
-            .arg(val)
-            .arg(ttl)
-            .invoke_async(&mut con)
-            .await;
-        match result {
-            Ok(val) => val == 1,
-            Err(_) => false,
-        }
+    #[cfg(feature = "tokio-comp")]
+    async fn lock_inner(&self) -> MutexGuard<'_, LockManagerInner>{
+        self.lock_manager_inner.lock().await
     }
 
-    async fn unlock_instance(client: &redis::Client, resource: &[u8], val: &[u8]) -> bool {
-        let mut con = match client.get_multiplexed_async_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
-        };
-        let script = redis::Script::new(UNLOCK_SCRIPT);
-        let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(&mut con).await;
-        match result {
-            Ok(val) => val == 1,
-            Err(_) => false,
-        }
-    }
 
     // Can be used for creating or extending a lock
-    async fn exec_or_retry<'a, T, Fut>(
-        &'a self,
+    async fn exec_or_retry(
+        &self,
         resource: &[u8],
         value: &[u8],
         ttl: usize,
-        lock: T,
+        function: Operation,
     ) -> Result<Lock, LockError>
-    where
-        T: Fn(&'a Client) -> Fut,
-        Fut: Future<Output = bool>,
     {
         for _ in 0..self.retry_count {
             let start_time = Instant::now();
-            let n = join_all(self.lock_manager_inner.servers.iter().map(&lock))
-                .await
-                .into_iter()
-                .fold(0, |count, locked| if locked { count + 1 } else { count });
+            let mut l = self.lock_inner().await;
+            let n = match function {
+                Operation::Lock => { 
+                    join_all(l.servers.iter_mut().map( |c| c.lock(resource, value, ttl) )).await
+                },
+                Operation::Extend => { 
+                    join_all(l.servers.iter_mut().map( |c| c.extend(resource, value, ttl))).await
+                }
+            }.into_iter().fold(0, |count, locked| if locked { count + 1 } else { count });
+
+            drop(l);
 
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
@@ -254,22 +392,24 @@ impl LockManager {
                 - elapsed.as_secs() as usize * 1000
                 - elapsed.subsec_nanos() as usize / 1_000_000;
 
-            if n >= self.lock_manager_inner.quorum && validity_time > 0 {
+            let mut l = self.lock_inner().await;
+            if n >= l.get_quorum() && validity_time > 0 {
                 return Ok(Lock {
                     lock_manager: self.clone(),
                     resource: resource.to_vec(),
                     val: value.to_vec(),
                     validity_time,
                 });
-            } else {
-                join_all(
-                    self.lock_manager_inner
-                        .servers
-                        .iter()
-                        .map(|client| Self::unlock_instance(client, resource, value)),
-                )
-                .await;
-            }
+            } 
+                
+            join_all(
+                l
+                    .servers
+                    .iter_mut()
+                    .map(|client| client.unlock(resource, value)),
+            )
+            .await;
+            
 
             let retry_delay: u64 = self
                 .retry_delay
@@ -284,25 +424,15 @@ impl LockManager {
     }
 
     // Query Redis for a key's value and keep trying each server until a successful result is returned
-    async fn query_redis_for_key_value(
-        &self,
-        resource: &[u8],
-    ) -> Result<Option<Vec<u8>>, LockError> {
-        for client in &self.lock_manager_inner.servers {
-            let mut con = match client.get_multiplexed_async_connection().await {
-                Ok(con) => con,
-                Err(_) => continue, // If connection fails, try the next server
-            };
+    async fn query_redis_for_key_value(&self,resource: &[u8]) -> Result<Option<Vec<u8>>, LockError> {
+        let mut l = self.lock_inner().await;
+        let e =  join_all(l.servers.iter_mut().map(|c| c.query(resource))).await;
 
-            let result: RedisResult<Option<Vec<u8>>> =
-                redis::cmd("GET").arg(resource).query_async(&mut con).await;
-
-            match result {
-                Ok(val) => return Ok(val),
-                Err(_) => continue, // If query fails, try the next server
+        for entry in e {
+            if entry.is_ok() {
+                return Ok(entry.unwrap());
             }
         }
-
         Err(LockError::RedisConnectionFailed) // All servers failed
     }
 
@@ -311,11 +441,13 @@ impl LockManager {
     /// Unlock is best effort. It will simply try to contact all instances
     /// and remove the key.
     pub async fn unlock(&self, lock: &Lock) {
+        let mut l = self.lock_inner().await;
         join_all(
-            self.lock_manager_inner
+            l
                 .servers
-                .iter()
-                .map(|client| Self::unlock_instance(client, &lock.resource, &lock.val)),
+                .iter_mut()
+                .map(|client| client.unlock(&lock.resource, &lock.val)
+            ),
         )
         .await;
     }
@@ -336,10 +468,7 @@ impl LockManager {
             .try_into()
             .map_err(|_| LockError::TtlTooLarge)?;
 
-        self.exec_or_retry(resource, &val.clone(), ttl, move |client| {
-            Self::lock_instance(client, resource, val.clone(), ttl)
-        })
-        .await
+        self.exec_or_retry(resource, &val.clone(), ttl, Operation::Lock).await
     }
 
     /// Loops until the lock is acquired.
@@ -380,10 +509,7 @@ impl LockManager {
             .try_into()
             .map_err(|_| LockError::TtlTooLarge)?;
 
-        self.exec_or_retry(&lock.resource, &lock.val, ttl, move |client| {
-            Self::extend_lock_instance(client, &lock.resource, &lock.val, ttl)
-        })
-        .await
+        self.exec_or_retry(&lock.resource, &lock.val, ttl, Operation::Extend).await
     }
 
     /// Checks if the given lock has been freed (i.e., is no longer held).
@@ -535,9 +661,10 @@ mod tests {
         let (_containers, addresses) = create_clients().await;
 
         let rl = LockManager::new(addresses.clone());
-
-        assert_eq!(3, rl.lock_manager_inner.servers.len());
-        assert_eq!(2, rl.lock_manager_inner.quorum);
+        let l = rl.lock_inner().await;
+        
+        assert_eq!(3, l.servers.len());
+        assert_eq!(2, l.get_quorum());
     }
 
     #[tokio::test]
@@ -548,11 +675,13 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        assert!(!LockManager::unlock_instance(&rl.lock_manager_inner.servers[0], &key, &val).await);
+        let mut l = rl.lock_inner().await;
+        assert!(!l.servers[0].unlock(&key, &val).await);
 
         Ok(())
     }
 
+    
     #[tokio::test]
     async fn test_lock_direct_unlock_succeeds() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -561,20 +690,20 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await?;
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await?;
+
         redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
             .exec_async(&mut con)
             .await?;
 
-        assert!(LockManager::unlock_instance(&rl.lock_manager_inner.servers[0], &key, &val).await);
-
+        assert!(l.servers[0].unlock(&key, &val).await);
         Ok(())
     }
 
+    
     #[tokio::test]
     async fn test_lock_direct_lock_succeeds() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -583,21 +712,11 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await?;
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await?;
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
-        assert!(
-            LockManager::lock_instance(
-                &rl.lock_manager_inner.servers[0],
-                &key,
-                val.clone(),
-                10_000
-            )
-            .await
-        );
-
+        assert!(l.servers[0].lock(&key, &val, 10_000).await);
         Ok(())
     }
 
@@ -609,12 +728,14 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut con = rl.lock_manager_inner.servers[0].get_connection()?;
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await?;
+        drop(l);
         let _: () = redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
-            .query(&mut con)
-            .unwrap();
+            .query_async(&mut con)
+            .await?;
 
         let lock = Lock {
             lock_manager: rl.clone(),
@@ -628,6 +749,7 @@ mod tests {
         Ok(())
     }
 
+    
     #[tokio::test]
     async fn test_lock_lock() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -651,6 +773,7 @@ mod tests {
         Ok(())
     }
 
+    
     #[tokio::test]
     async fn test_lock_lock_unlock() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -716,7 +839,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "tokio-comp")]
+    #[cfg(feature = "tokio-comp")] 
     #[tokio::test]
     async fn test_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -726,6 +849,7 @@ mod tests {
         let key = rl1.get_unique_lock_id()?;
 
         async {
+            //The acquire function is only enabled for `async-std-comp` ??
             let lock_guard = rl1
                 .acquire(&key, Duration::from_millis(10_000))
                 .await
@@ -897,6 +1021,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "tokio-comp")]
     async fn test_lock_send_lock_manager() {
         let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
@@ -920,6 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "tokio-comp")]
     async fn test_lock_state_in_multiple_threads() {
         let (_containers, addresses) = create_clients().await;
         let rl = LockManager::new(addresses.clone());
@@ -978,10 +1104,8 @@ mod tests {
             .unwrap();
 
         // Ensure Redis key is correctly set and matches the lock value
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await.unwrap();
         let redis_val: Option<Vec<u8>> = redis::cmd("GET")
             .arg(&lock.resource)
             .query_async(&mut con)
@@ -1055,10 +1179,10 @@ mod tests {
             .unwrap();
 
         // Manually delete the key in Redis to simulate it being missing
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await.unwrap();
+        drop(l);
+
         redis::cmd("DEL")
             .arg(&lock.resource)
             .query_async::<()>(&mut con)
@@ -1141,10 +1265,9 @@ mod tests {
             .unwrap();
 
         // Set a different value for the same key to simulate a mismatch
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await.unwrap();
+        drop(l);
         let different_value: Vec<u8> = vec![1, 2, 3, 4, 5]; // Different value
         redis::cmd("SET")
             .arg(&lock.resource)
@@ -1175,10 +1298,9 @@ mod tests {
             .unwrap();
 
         // Manually delete the key in Redis to simulate it being missing
-        let mut con = rl.lock_manager_inner.servers[0]
-            .get_multiplexed_async_connection()
-            .await
-            .unwrap();
+        let mut l = rl.lock_inner().await;
+        let mut con = l.servers[0].get_connection().await.unwrap();
+        drop(l);
         redis::cmd("DEL")
             .arg(&lock.resource)
             .query_async::<()>(&mut con)
@@ -1206,8 +1328,9 @@ mod tests {
 
         let lock_manager = LockManager::from_clients(clients);
 
-        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 3);
-        assert_eq!(lock_manager.lock_manager_inner.quorum, 2);
+        let l = lock_manager.lock_inner().await;
+        assert_eq!(l.servers.len(), 3);
+        assert_eq!(l.get_quorum(), 2);
     }
 
     #[tokio::test]
@@ -1223,7 +1346,8 @@ mod tests {
 
         let lock_manager = LockManager::from_clients(clients);
 
-        assert_eq!(lock_manager.lock_manager_inner.servers.len(), 2);
-        assert_eq!(lock_manager.lock_manager_inner.quorum, 2); // 2/2+1 still rounds to 2
+        let l = lock_manager.lock_inner().await;
+        assert_eq!(l.servers.len(), 2);
+        assert_eq!(l.get_quorum(), 2); // 2/2+1 still rounds to 2
     }
 }
