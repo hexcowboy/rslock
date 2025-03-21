@@ -20,7 +20,7 @@ edition = "2021"
 
 [features]
 async-std-comp = ["redis/async-std-comp"]
-tokio-comp = ["redis/tokio-comp"]
+tokio-comp = ["redis/tokio-rustls-comp"]
 default = ["async-std-comp"]
 
 [dependencies]
