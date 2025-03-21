@@ -81,7 +81,7 @@ Extending a lock effectively renews its duration instead of adding extra time to
 Run tests with:
 
 ```
-cargo test
+cargo test --all-features
 ```
 
 ## Examples
