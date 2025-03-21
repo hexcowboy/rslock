@@ -64,7 +64,7 @@ pub enum LockError {
 #[derive(Debug, Clone)]
 pub struct LockManager {
     lock_manager_inner: Arc<LockManagerInner>,
-    retry_count: u32,
+    try_count: u32,
     retry_delay: Duration,
 }
 
@@ -141,7 +141,7 @@ impl LockManager {
                 servers: clients,
                 quorum,
             }),
-            retry_count: DEFAULT_RETRY_COUNT,
+            try_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
     }
@@ -153,13 +153,20 @@ impl LockManager {
         Ok(buf.to_vec())
     }
 
-    /// Set retry count and retry delay.
+    /// Set total number of tries and maximum retry delay.
+    /// 
+    /// Retries will be delayed by a random amount of time between `0` and `delay`.
     ///
-    /// Retry count defaults to `3`.
-    /// Retry delay defaults to `200`.
-    pub fn set_retry(&mut self, count: u32, delay: Duration) {
-        self.retry_count = count;
+    /// Try count defaults to `3`.
+    /// Retry delay defaults to `200 ms`.
+    pub fn set_retry_policy(&mut self, count: u32, delay: Duration) {
+        self.try_count = count;
         self.retry_delay = delay;
+    }
+
+    #[deprecated(note = "Please use `set_retry_policy` instead")]
+    pub fn set_retry(&mut self, count: u32, delay: Duration) {
+        self.set_retry_policy(count, delay);
     }
 
     async fn lock_instance(
@@ -235,7 +242,9 @@ impl LockManager {
         T: Fn(&'a Client) -> Fut,
         Fut: Future<Output = bool>,
     {
-        for _ in 0..self.retry_count {
+        let mut current_try = 1;
+
+        loop {
             let start_time = Instant::now();
             let n = join_all(self.lock_manager_inner.servers.iter().map(&lock))
                 .await
@@ -271,13 +280,18 @@ impl LockManager {
                 .await;
             }
 
-            let retry_delay: u64 = self
-                .retry_delay
-                .as_millis()
-                .try_into()
-                .map_err(|_| LockError::TtlTooLarge)?;
-            let n = thread_rng().gen_range(0..retry_delay);
-            tokio::time::sleep(Duration::from_millis(n)).await
+            if current_try < self.try_count {
+                current_try += 1;
+                let retry_delay: u64 = self
+                    .retry_delay
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| LockError::TtlTooLarge)?;
+                let n = thread_rng().gen_range(0..retry_delay);
+                tokio::time::sleep(Duration::from_millis(n)).await
+            } else {
+                break;
+            }
         }
 
         Err(LockError::Unavailable)
@@ -323,10 +337,11 @@ impl LockManager {
     /// Acquire the lock for the given resource and the requested TTL.
     ///
     /// If it succeeds, a `Lock` instance is returned,
-    /// including the value and the validity time
+    /// including the value and the validity time.
     ///
-    /// If it fails. `None` is returned.
+    /// If it fails, `LockError::Unavailable` is returned.
     /// A user should retry after a short wait time.
+    /// See `LockManger::set_retry_policy` for automatic retries.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     pub async fn lock(&self, resource: &[u8], ttl: Duration) -> Result<Lock, LockError> {
@@ -863,7 +878,7 @@ mod tests {
 
         let mut rl = LockManager::new(addresses.clone());
         // Set a high retry count to ensure retries happen
-        rl.set_retry(10, Duration::from_millis(10)); // Retry 10 times with 10 milliseconds delay
+        rl.set_retry_policy(10, Duration::from_millis(10)); // Retry 10 times with 10 milliseconds delay
 
         let key = rl.get_unique_lock_id()?;
 
