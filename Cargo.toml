@@ -19,7 +19,7 @@ readme = "README.md"
 edition = "2021"
 
 [features]
-async-std-comp = ["redis/async-std-comp"]
+async-std-comp = ["redis/async-std-rustls-comp"]
 tokio-comp = ["redis/tokio-rustls-comp"]
 default = ["async-std-comp"]
 
