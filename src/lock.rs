@@ -50,6 +50,9 @@ pub enum LockError {
     #[error("Redis connection failed for all servers")]
     RedisConnectionFailed,
 
+    #[error("Redis connection failed.")]
+    RedisFailedToEstablishConnection,
+
     #[error("Redis key mismatch: expected value does not match actual value")]
     RedisKeyMismatch,
 
@@ -59,14 +62,8 @@ pub enum LockError {
     MutexPoisoned,
 }
 
-#[cfg(not(feature = "tokio-comp"))]
-type Mutex<T> = std::sync::Mutex<T>;
-#[cfg(not(feature = "tokio-comp"))]
-type MutexGuard<'a, K> = std::sync::MutexGuard<'a, K>;
-
-#[cfg(feature = "tokio-comp")]
+//This is in place to make it easier to swap to just an std-async io implementaiton ??
 type Mutex<T> = tokio::sync::Mutex<T>;
-#[cfg(feature = "tokio-comp")]
 type MutexGuard<'a, K> = tokio::sync::MutexGuard<'a, K>;
 
 /// The lock manager.
@@ -92,65 +89,13 @@ impl LockManagerInner {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg(not(feature = "tokio-comp"))]
-struct RestorableConnection {
-    client: Client,
-    pub con: Arc<Mutex<Option<MultiplexedConnection>>>
-}
-
-
-#[cfg(not(feature = "tokio-comp"))]
-impl RestorableConnection {
-    pub fn new(client: Client) -> Self {
-        //TODO: Is error handling appropriate here??
-        Self {
-            client,
-            con: Arc::new( Mutex::new( None ))
-        }
-    }
-
-    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
-        let lock = self.con.lock();
-        if lock.is_err() {
-            return Err(LockError::MutexPoisoned);
-        }
-        let mut lock = lock.unwrap();
-        if lock.is_none() {
-            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
-        }
-        let conn = (*lock).clone().unwrap();
-        return Ok(conn);
-    }
-
-
-    pub async fn recover(&mut self, error: RedisError) -> Result<(), LockError> {
-        //We need to rebuild the connection
-        if !error.is_unrecoverable_error() {
-            return Ok(());
-        }
-        else {
-            let lock = self.con.lock();
-            if lock.is_err() {
-                return Err(LockError::MutexPoisoned);
-            }
-
-            let mut lock = lock.unwrap();
-            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
-            return Ok(());
-        }
-        
-    }
-}
 
 #[derive(Debug, Clone)]
-#[cfg(feature = "tokio-comp")]
 struct RestorableConnection {
     client: Client,
     con: Arc<Mutex<Option<MultiplexedConnection>>>
 }
 
-#[cfg(feature = "tokio-comp")]
 impl RestorableConnection {
     pub fn new(client: Client) -> Self {
         //TODO: Is error handling appropriate here??
@@ -163,10 +108,13 @@ impl RestorableConnection {
     pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
         let mut lock = self.con.lock().await;
         if lock.is_none() {
-            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+            *lock = Some( self.client.get_multiplexed_async_connection().await.map_err(|x| LockError::Redis(x))? );
         }
-        let conn = (*lock).clone().unwrap();
-        return Ok(conn);
+        match (*lock).clone()
+        {
+            Some(conn) => Ok(conn),
+            None => Err(LockError::RedisFailedToEstablishConnection)
+        }
     }
 
     pub async fn recover(&mut self, error: RedisError) -> Result<(), LockError> {
@@ -176,7 +124,7 @@ impl RestorableConnection {
         }
         else {
             let mut lock = self.con.lock().await;
-            *lock = Some( self.client.get_multiplexed_async_connection().await.unwrap() );
+            *lock = Some( self.client.get_multiplexed_async_connection().await.map_err(|x| LockError::Redis(x))?);
             return Ok(());
         }
     }
@@ -346,16 +294,9 @@ impl LockManager {
         self.retry_delay = delay;
     }
 
-    #[cfg(not(feature = "tokio-comp"))]
-    async fn lock_inner(&self) -> MutexGuard<'_, LockManagerInner>{
-        self.lock_manager_inner.lock().unwrap()
-    }
-
-    #[cfg(feature = "tokio-comp")]
     async fn lock_inner(&self) -> MutexGuard<'_, LockManagerInner>{
         self.lock_manager_inner.lock().await
     }
-
 
     // Can be used for creating or extending a lock
     async fn exec_or_retry(
