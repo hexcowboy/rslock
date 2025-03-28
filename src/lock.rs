@@ -97,7 +97,6 @@ struct RestorableConnection {
 
 impl RestorableConnection {
     pub fn new(client: Client) -> Self {
-        //TODO: Is error handling appropriate here??
         Self {
             client,
             con: Arc::new(tokio::sync::Mutex::new(None)),
@@ -278,10 +277,8 @@ impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis clients.
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
     pub fn from_clients(clients: Vec<Client>) -> LockManager {
-        let clients: Vec<RestorableConnection> = clients
-            .into_iter()
-            .map(RestorableConnection::new)
-            .collect();
+        let clients: Vec<RestorableConnection> =
+            clients.into_iter().map(RestorableConnection::new).collect();
         LockManager {
             lock_manager_inner: Arc::new(Mutex::new(LockManagerInner { servers: clients })),
             retry_count: DEFAULT_RETRY_COUNT,
@@ -319,19 +316,20 @@ impl LockManager {
     ) -> Result<Lock, LockError> {
         for _ in 0..self.retry_count {
             let start_time = Instant::now();
-            let mut l = self.lock_inner().await;
+            let l = self.lock_inner().await;
+            let mut servers = l.servers.clone();
+            drop(l);
+
             let n = match function {
                 Operation::Lock => {
-                    join_all(l.servers.iter_mut().map(|c| c.lock(resource, value, ttl))).await
+                    join_all(servers.iter_mut().map(|c| c.lock(resource, value, ttl))).await
                 }
                 Operation::Extend => {
-                    join_all(l.servers.iter_mut().map(|c| c.extend(resource, value, ttl))).await
+                    join_all(servers.iter_mut().map(|c| c.extend(resource, value, ttl))).await
                 }
             }
             .into_iter()
             .fold(0, |count, locked| if locked { count + 1 } else { count });
-
-            drop(l);
 
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
             let elapsed = start_time.elapsed();
@@ -345,7 +343,7 @@ impl LockManager {
                 - elapsed.as_secs() as usize * 1000
                 - elapsed.subsec_nanos() as usize / 1_000_000;
 
-            let mut l = self.lock_inner().await;
+            let l = self.lock_inner().await;
             if n >= l.get_quorum() && validity_time > 0 {
                 return Ok(Lock {
                     lock_manager: self.clone(),
@@ -355,12 +353,9 @@ impl LockManager {
                 });
             }
 
-            join_all(
-                l.servers
-                    .iter_mut()
-                    .map(|client| client.unlock(resource, value)),
-            )
-            .await;
+            let mut servers = l.servers.clone();
+            drop(l);
+            join_all(servers.iter_mut().map(|client| client.unlock(resource, value))).await;
 
             let retry_delay: u64 = self
                 .retry_delay
@@ -379,8 +374,10 @@ impl LockManager {
         &self,
         resource: &[u8],
     ) -> Result<Option<Vec<u8>>, LockError> {
-        let mut l = self.lock_inner().await;
-        let results = join_all(l.servers.iter_mut().map(|c| c.query(resource))).await;
+        let l = self.lock_inner().await;
+        let mut servers = l.servers.clone();
+        drop(l);
+        let results = join_all(servers.iter_mut().map(|c| c.query(resource))).await;
 
         if let Some(value) = results.into_iter().find_map(Result::ok) {
             return Ok(value);
@@ -393,13 +390,10 @@ impl LockManager {
     /// Unlock is best effort. It will simply try to contact all instances
     /// and remove the key.
     pub async fn unlock(&self, lock: &Lock) {
-        let mut l = self.lock_inner().await;
-        join_all(
-            l.servers
-                .iter_mut()
-                .map(|client| client.unlock(&lock.resource, &lock.val)),
-        )
-        .await;
+        let l = self.lock_inner().await;
+        let mut servers = l.servers.clone();
+        drop(l);
+        join_all(servers.iter_mut().map(|client| client.unlock(&lock.resource, &lock.val))).await;
     }
 
     /// Acquire the lock for the given resource and the requested TTL.
@@ -837,6 +831,8 @@ mod tests {
             if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
                 panic!("Lock acquired, even though it should be locked")
             }
+
+            assert!(redis_key_verified);
         }
         .await;
 
