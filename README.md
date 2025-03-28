@@ -78,7 +78,7 @@ Extending a lock effectively renews its duration instead of adding extra time to
 
 ## Tests
 
-Run tests with:
+Make sure you have Docker running since all tests use `testcontainers`. Run tests with:
 
 ```
 cargo test
