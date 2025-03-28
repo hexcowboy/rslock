@@ -355,7 +355,12 @@ impl LockManager {
 
             let mut servers = l.servers.clone();
             drop(l);
-            join_all(servers.iter_mut().map(|client| client.unlock(resource, value))).await;
+            join_all(
+                servers
+                    .iter_mut()
+                    .map(|client| client.unlock(resource, value)),
+            )
+            .await;
 
             let retry_delay: u64 = self
                 .retry_delay
@@ -393,7 +398,12 @@ impl LockManager {
         let l = self.lock_inner().await;
         let mut servers = l.servers.clone();
         drop(l);
-        join_all(servers.iter_mut().map(|client| client.unlock(&lock.resource, &lock.val))).await;
+        join_all(
+            servers
+                .iter_mut()
+                .map(|client| client.unlock(&lock.resource, &lock.val)),
+        )
+        .await;
     }
 
     /// Acquire the lock for the given resource and the requested TTL.
