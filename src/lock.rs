@@ -295,6 +295,8 @@ impl LockManager {
 
     /// Set retry count and retry delay.
     ///
+    /// Retries will be delayed by a random amount of time between `0` and `retry_delay`.
+    ///
     /// Retry count defaults to `3`.
     /// Retry delay defaults to `200`.
     pub fn set_retry(&mut self, count: u32, delay: Duration) {
@@ -314,7 +316,9 @@ impl LockManager {
         ttl: usize,
         function: Operation,
     ) -> Result<Lock, LockError> {
-        for _ in 0..self.retry_count {
+        let mut current_try = 1;
+
+        loop {
             let start_time = Instant::now();
             let l = self.lock_inner().await;
             let mut servers = l.servers.clone();
@@ -362,13 +366,22 @@ impl LockManager {
             )
             .await;
 
-            let retry_delay: u64 = self
-                .retry_delay
-                .as_millis()
-                .try_into()
-                .map_err(|_| LockError::TtlTooLarge)?;
-            let n = thread_rng().gen_range(0..retry_delay);
-            tokio::time::sleep(Duration::from_millis(n)).await
+            // only sleep here if we have any retries left
+            if current_try < self.retry_count {
+                current_try += 1;
+
+                let retry_delay: u64 = self
+                    .retry_delay
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| LockError::TtlTooLarge)?;
+
+                let n = thread_rng().gen_range(0..retry_delay);
+
+                tokio::time::sleep(Duration::from_millis(n)).await
+            } else {
+                break;
+            }
         }
 
         Err(LockError::Unavailable)
