@@ -24,9 +24,9 @@ tokio-comp = ["redis/tokio-rustls-comp"]
 default = ["async-std-comp"]
 
 [dependencies]
-redis = { version = "0.27.5" }
-tokio = { version = "1.41.1", features = ["rt", "time"] }
-rand = "0.8.5"
+redis = { version = "0.29.5" }
+tokio = { version = "1.44.2", features = ["rt", "time"] }
+rand = "0.9.1"
 futures = "0.3.31"
 thiserror = "2.0.3"
 
@@ -34,5 +34,5 @@ thiserror = "2.0.3"
 once_cell = "^1.20.2"
 testcontainers = "^0.23.1"
 anyhow = "^1.0.93"
-tokio = { version = "^1.41.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "^1.44.2", features = ["macros", "rt-multi-thread"] }
 tokio-test = "^0.4.4"
