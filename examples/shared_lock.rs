@@ -26,7 +26,7 @@ async fn main() {
             // Acquire the lock
             let lock = loop {
                 match lock_manager
-                    .lock("shared_mutex".as_bytes(), Duration::from_millis(2000))
+                    .lock("shared_mutex", Duration::from_millis(2000))
                     .await
                 {
                     Ok(lock) => break Arc::new(lock),
