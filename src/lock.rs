@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rand::{thread_rng, Rng, RngCore};
+use rand::{rng, Rng, RngCore};
 use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
@@ -289,7 +289,7 @@ impl LockManager {
     /// Get 20 random bytes from the pseudorandom interface.
     pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
         let mut buf = [0u8; 20];
-        thread_rng().fill_bytes(&mut buf);
+        rng().fill_bytes(&mut buf);
         Ok(buf.to_vec())
     }
 
@@ -376,7 +376,7 @@ impl LockManager {
                     .try_into()
                     .map_err(|_| LockError::TtlTooLarge)?;
 
-                let n = thread_rng().gen_range(0..retry_delay);
+                let n = rng().random_range(0..retry_delay);
 
                 tokio::time::sleep(Duration::from_millis(n)).await
             } else {
