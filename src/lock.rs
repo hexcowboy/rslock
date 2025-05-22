@@ -504,6 +504,35 @@ impl LockManager {
             None => Err(LockError::RedisKeyNotFound), // Key does not exist
         }
     }
+
+    #[cfg(feature = "tokio-comp")]
+    pub async fn using<R>(
+        &self,
+        resource: &[u8],
+        ttl: Duration,
+        routine: impl AsyncFnOnce() -> R,
+    ) -> Result<R, LockError> {
+        let mut lock = self.acquire_no_guard(resource, ttl).await?;
+        let mut threshold = lock.validity_time as u64 - 500;
+
+        let routine = routine();
+        futures::pin_mut!(routine);
+
+        loop {
+            match tokio::time::timeout(Duration::from_millis(threshold), &mut routine).await {
+                Ok(result) => {
+                    self.unlock(&lock).await;
+
+                    return Ok(result);
+                }
+
+                Err(_) => {
+                    lock = self.extend(&lock, ttl).await?;
+                    threshold = lock.validity_time as u64 - 500;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
