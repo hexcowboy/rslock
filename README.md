@@ -5,9 +5,6 @@
 
 This is an implementation of Redlock, the [distributed locking mechanism](http://redis.io/topics/distlock) built on top of Redis.
 
-> [!WARNING]
-> Before release `1.0.0`, this crate will have breaking changes between minor versions. You can upgrade to patch versions without worrying about breaking changes.
-
 ## Features
 
 - Lock extending
@@ -16,8 +13,12 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 
 ## Install
 
+> [!WARNING]
+> Before release `1.0.0`, this crate will have breaking changes between minor versions. You can upgrade to patch versions without worrying about breaking changes.
+
 ```bash
-cargo add rslock
+# It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
+cargo add rslock --vers "~0.7.2"
 ```
 
 > [!NOTE]
