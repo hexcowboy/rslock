@@ -1,3 +1,5 @@
+mod resource;
+
 #[cfg(any(feature = "async-std-comp", feature = "tokio-comp"))]
 mod lock;
 

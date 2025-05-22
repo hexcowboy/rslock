@@ -8,6 +8,8 @@ use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
 
+use crate::resource::{LockResource, ToLockResource};
+
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(200);
 const CLOCK_DRIFT_FACTOR: f32 = 0.01;
@@ -137,7 +139,7 @@ impl RestorableConnection {
 }
 
 impl RestorableConnection {
-    async fn lock(&mut self, resource: &[u8], val: &[u8], ttl: usize) -> bool {
+    async fn lock(&mut self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
         let mut con = match self.get_connection().await {
             Err(_) => return false,
             Ok(val) => val,
@@ -163,7 +165,7 @@ impl RestorableConnection {
         }
     }
 
-    async fn extend(&mut self, resource: &[u8], val: &[u8], ttl: usize) -> bool {
+    async fn extend(&mut self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
         let mut con = match self.get_connection().await {
             Err(_) => return false,
             Ok(val) => val,
@@ -185,7 +187,8 @@ impl RestorableConnection {
         }
     }
 
-    async fn unlock(&mut self, resource: &[u8], val: &[u8]) -> bool {
+    async fn unlock(&mut self, resource: impl ToLockResource<'_>, val: &[u8]) -> bool {
+        let resource = resource.to_lock_resource();
         let mut con = match self.get_connection().await {
             Err(_) => return false,
             Ok(val) => val,
@@ -311,12 +314,13 @@ impl LockManager {
     // Can be used for creating or extending a lock
     async fn exec_or_retry(
         &self,
-        resource: &[u8],
+        resource: impl ToLockResource<'_>,
         value: &[u8],
         ttl: usize,
         function: Operation,
     ) -> Result<Lock, LockError> {
         let mut current_try = 1;
+        let resource = &resource.to_lock_resource();
 
         loop {
             let start_time = Instant::now();
@@ -362,7 +366,7 @@ impl LockManager {
             join_all(
                 servers
                     .iter_mut()
-                    .map(|client| client.unlock(resource, value)),
+                    .map(|client| client.unlock(&*resource, value)),
             )
             .await;
 
@@ -414,7 +418,7 @@ impl LockManager {
         join_all(
             servers
                 .iter_mut()
-                .map(|client| client.unlock(&lock.resource, &lock.val)),
+                .map(|client| client.unlock(&*lock.resource, &lock.val)),
         )
         .await;
     }
@@ -428,14 +432,19 @@ impl LockManager {
     /// A user should retry after a short wait time.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
-    pub async fn lock(&self, resource: &[u8], ttl: Duration) -> Result<Lock, LockError> {
+    pub async fn lock(
+        &self,
+        resource: impl ToLockResource<'_>,
+        ttl: Duration,
+    ) -> Result<Lock, LockError> {
+        let resource = resource.to_lock_resource();
         let val = self.get_unique_lock_id().map_err(LockError::Io)?;
         let ttl = ttl
             .as_millis()
             .try_into()
             .map_err(|_| LockError::TtlTooLarge)?;
 
-        self.exec_or_retry(resource, &val.clone(), ttl, Operation::Lock)
+        self.exec_or_retry(&resource, &val.clone(), ttl, Operation::Lock)
             .await
     }
 
@@ -445,7 +454,11 @@ impl LockManager {
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     #[cfg(feature = "async-std-comp")]
-    pub async fn acquire(&self, resource: &[u8], ttl: Duration) -> Result<LockGuard, LockError> {
+    pub async fn acquire(
+        &self,
+        resource: impl ToLockResource<'_>,
+        ttl: Duration,
+    ) -> Result<LockGuard, LockError> {
         let lock = self.acquire_no_guard(resource, ttl).await?;
         Ok(LockGuard { lock })
     }
@@ -458,9 +471,10 @@ impl LockManager {
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     pub async fn acquire_no_guard(
         &self,
-        resource: &[u8],
+        resource: impl ToLockResource<'_>,
         ttl: Duration,
     ) -> Result<Lock, LockError> {
+        let resource = &resource.to_lock_resource();
         loop {
             match self.lock(resource, ttl).await {
                 Ok(lock) => return Ok(lock),
@@ -477,7 +491,7 @@ impl LockManager {
             .try_into()
             .map_err(|_| LockError::TtlTooLarge)?;
 
-        self.exec_or_retry(&lock.resource, &lock.val, ttl, Operation::Extend)
+        self.exec_or_retry(&*lock.resource, &lock.val, ttl, Operation::Extend)
             .await
     }
 
@@ -706,13 +720,14 @@ mod tests {
 
         let rl = LockManager::new(addresses.clone());
         let key = rl.get_unique_lock_id()?;
+        let resource = key.to_lock_resource();
 
         let val = rl.get_unique_lock_id()?;
         let mut l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await?;
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
-        assert!(l.servers[0].lock(&key, &val, 10_000).await);
+        assert!(l.servers[0].lock(&resource, &val, 10_000).await);
         Ok(())
     }
 

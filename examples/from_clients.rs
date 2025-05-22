@@ -21,10 +21,7 @@ async fn main() {
 
     // Acquire a lock
     let lock = loop {
-        if let Ok(lock) = rl
-            .lock("mutex".as_bytes(), Duration::from_millis(1000))
-            .await
-        {
+        if let Ok(lock) = rl.lock("mutex", Duration::from_millis(1000)).await {
             break lock;
         }
     };
