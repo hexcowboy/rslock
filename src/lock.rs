@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rand::{thread_rng, Rng, RngCore};
+use rand::{rng, Rng, RngCore};
 use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
@@ -292,11 +292,13 @@ impl LockManager {
     /// Get 20 random bytes from the pseudorandom interface.
     pub fn get_unique_lock_id(&self) -> io::Result<Vec<u8>> {
         let mut buf = [0u8; 20];
-        thread_rng().fill_bytes(&mut buf);
+        rng().fill_bytes(&mut buf);
         Ok(buf.to_vec())
     }
 
     /// Set retry count and retry delay.
+    ///
+    /// Retries will be delayed by a random amount of time between `0` and `retry_delay`.
     ///
     /// Retry count defaults to `3`.
     /// Retry delay defaults to `200`.
@@ -317,9 +319,10 @@ impl LockManager {
         ttl: usize,
         function: Operation,
     ) -> Result<Lock, LockError> {
+        let mut current_try = 1;
         let resource = &resource.to_lock_resource();
 
-        for _ in 0..self.retry_count {
+        loop {
             let start_time = Instant::now();
             let l = self.lock_inner().await;
             let mut servers = l.servers.clone();
@@ -367,13 +370,22 @@ impl LockManager {
             )
             .await;
 
-            let retry_delay: u64 = self
-                .retry_delay
-                .as_millis()
-                .try_into()
-                .map_err(|_| LockError::TtlTooLarge)?;
-            let n = thread_rng().gen_range(0..retry_delay);
-            tokio::time::sleep(Duration::from_millis(n)).await
+            // only sleep here if we have any retries left
+            if current_try < self.retry_count {
+                current_try += 1;
+
+                let retry_delay: u64 = self
+                    .retry_delay
+                    .as_millis()
+                    .try_into()
+                    .map_err(|_| LockError::TtlTooLarge)?;
+
+                let n = rng().random_range(0..retry_delay);
+
+                tokio::time::sleep(Duration::from_millis(n)).await
+            } else {
+                break;
+            }
         }
 
         Err(LockError::Unavailable)
@@ -504,6 +516,35 @@ impl LockManager {
                 }
             }
             None => Err(LockError::RedisKeyNotFound), // Key does not exist
+        }
+    }
+
+    #[cfg(feature = "tokio-comp")]
+    pub async fn using<R>(
+        &self,
+        resource: &[u8],
+        ttl: Duration,
+        routine: impl AsyncFnOnce() -> R,
+    ) -> Result<R, LockError> {
+        let mut lock = self.acquire_no_guard(resource, ttl).await?;
+        let mut threshold = lock.validity_time as u64 - 500;
+
+        let routine = routine();
+        futures::pin_mut!(routine);
+
+        loop {
+            match tokio::time::timeout(Duration::from_millis(threshold), &mut routine).await {
+                Ok(result) => {
+                    self.unlock(&lock).await;
+
+                    return Ok(result);
+                }
+
+                Err(_) => {
+                    lock = self.extend(&lock, ttl).await?;
+                    threshold = lock.validity_time as u64 - 500;
+                }
+            }
         }
     }
 }
