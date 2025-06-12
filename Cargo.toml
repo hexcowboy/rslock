@@ -24,7 +24,7 @@ tokio-comp = ["redis/tokio-rustls-comp"]
 default = ["async-std-comp"]
 
 [dependencies]
-redis = { version = "0.31.0" }
+redis = { version = "0.32.0" }
 tokio = { version = "1.45.0", features = ["rt", "time"] }
 rand = "0.9.1"
 futures = "0.3.31"
