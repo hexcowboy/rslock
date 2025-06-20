@@ -1,7 +1,7 @@
 [package]
 
 name = "rslock"
-version = "0.7.2"
+version = "0.7.3"
 authors = [
   "Jan-Erik Rediger <badboy@archlinux.us>",
   "Romain Boces <bocesr@gmail.com>",
@@ -24,8 +24,8 @@ tokio-comp = ["redis/tokio-rustls-comp"]
 default = ["async-std-comp"]
 
 [dependencies]
-redis = { version = "0.31.0" }
-tokio = { version = "1.45.0", features = ["rt", "time"] }
+redis = { version = "0.32.2" }
+tokio = { version = "1.45.1", features = ["rt", "time"] }
 rand = "0.9.1"
 futures = "0.3.31"
 thiserror = "2.0.12"
