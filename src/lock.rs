@@ -1,13 +1,15 @@
+use std::fmt::Debug;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rand::{rng, Rng, RngCore};
-use redis::aio::MultiplexedConnection;
+use redis::aio::{ConnectionLike, MultiplexedConnection};
 use redis::Value::Okay;
-use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
-
+use redis::{Client, Cmd, IntoConnectionInfo, Pipeline, RedisError, RedisFuture, RedisResult, Value};
+use redis::cluster::ClusterClient;
+use redis::cluster_async::ClusterConnection;
 use crate::resource::{LockResource, ToLockResource};
 
 const DEFAULT_RETRY_COUNT: u32 = 3;
@@ -68,6 +70,95 @@ pub enum LockError {
 type Mutex<T> = tokio::sync::Mutex<T>;
 type MutexGuard<'a, K> = tokio::sync::MutexGuard<'a, K>;
 
+/// Connection type supporting both standalone and cluster modes
+#[derive(Clone)]
+enum Connection {
+    Standalone(MultiplexedConnection),
+    Cluster(ClusterConnection),
+}
+
+impl Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Connection::Standalone(_) => write!(f, "Connection::Standalone(..)"),
+            Connection::Cluster(_) => write!(f, "Connection::Cluster(..)"),
+        }
+    }
+}
+
+impl ConnectionLike for Connection {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
+        match self {
+            Connection::Standalone(conn) => conn.req_packed_command(cmd),
+            Connection::Cluster(conn) => conn.req_packed_command(cmd),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        cmd: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        match self {
+            Connection::Standalone(conn) => conn.req_packed_commands(cmd, offset, count),
+            Connection::Cluster(conn) => conn.req_packed_commands(cmd, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            Connection::Standalone(conn) => conn.get_db(),
+            Connection::Cluster(conn) => conn.get_db(),
+        }
+    }
+}
+
+/// Client information supporting both standalone and cluster modes
+enum ClientInfo {
+    Standalone(Client),
+    Cluster(ClusterClient),
+}
+
+impl ClientInfo {
+    async fn get_connection(&self) -> Result<Connection, LockError> {
+        match self {
+            ClientInfo::Standalone(client) => {
+                let conn = client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(LockError::Redis)?;
+                Ok(Connection::Standalone(conn))
+            }
+            ClientInfo::Cluster(client) => {
+                let conn = client
+                    .get_async_connection()
+                    .await
+                    .map_err(LockError::Redis)?;
+                Ok(Connection::Cluster(conn))
+            }
+        }
+    }
+}
+
+impl Clone for ClientInfo {
+    fn clone(&self) -> Self {
+        match self {
+            ClientInfo::Standalone(client) => ClientInfo::Standalone(client.clone()),
+            ClientInfo::Cluster(client) => ClientInfo::Cluster(client.clone()),
+        }
+    }
+}
+
+impl Debug for ClientInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientInfo::Standalone(_) => write!(f, "ClientInfo::Standalone(..)"),
+            ClientInfo::Cluster(_) => write!(f, "ClientInfo::Cluster(..)"),
+        }
+    }
+}
+
 /// The lock manager.
 ///
 /// Implements the necessary functionality to acquire and release locks
@@ -93,27 +184,29 @@ impl LockManagerInner {
 
 #[derive(Debug, Clone)]
 struct RestorableConnection {
-    client: Client,
-    con: Arc<Mutex<Option<MultiplexedConnection>>>,
+    client_info: ClientInfo,
+    con: Arc<Mutex<Option<Connection>>>,
 }
 
 impl RestorableConnection {
-    pub fn new(client: Client) -> Self {
+    pub fn new_standalone(client: Client) -> Self {
         Self {
-            client,
-            con: Arc::new(tokio::sync::Mutex::new(None)),
+            client_info: ClientInfo::Standalone(client),
+            con: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
+    pub fn new_cluster(client: ClusterClient) -> Self {
+        Self {
+            client_info: ClientInfo::Cluster(client),
+            con: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub async fn get_connection(&mut self) -> Result<Connection, LockError> {
         let mut lock = self.con.lock().await;
         if lock.is_none() {
-            *lock = Some(
-                self.client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_err(LockError::Redis)?,
-            );
+            *lock = Some(self.client_info.get_connection().await?);
         }
         match (*lock).clone() {
             Some(conn) => Ok(conn),
@@ -127,12 +220,7 @@ impl RestorableConnection {
             Ok(())
         } else {
             let mut lock = self.con.lock().await;
-            *lock = Some(
-                self.client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_err(LockError::Redis)?,
-            );
+            *lock = Some(self.client_info.get_connection().await?);
             Ok(())
         }
     }
@@ -265,9 +353,7 @@ impl Drop for LockGuard {
 }
 
 impl LockManager {
-    /// Create a new lock manager instance, defined by the given Redis connection uris.
-    ///
-    /// Sample URI: `"redis://127.0.0.1:6379"`
+    /// Create a new lock manager for standalone Redis instances
     pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
         let servers: Vec<Client> = uris
             .into_iter()
@@ -277,11 +363,64 @@ impl LockManager {
         Self::from_clients(servers)
     }
 
-    /// Create a new lock manager instance, defined by the given Redis clients.
-    /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
+    /// Create a new lock manager for Redis Cluster
+    ///
+    /// `uris`: list of clusters; each inner list contains the startup node URLs of **one** cluster.
+    ///
+    /// **Important**
+    /// - Passing **one cluster** -> this is **not Redlock**; it's a **single-store lease lock**.
+    /// - Passing **multiple independent clusters** (`uris.len() > 1`) -> **Redlock quorum** (≥ N/2+1).
+    ///
+    /// Example:
+    /// ```rust
+    /// // Single cluster (lease lock, NOT Redlock)
+    /// use rslock::LockManager;
+    /// let lm = LockManager::new_cluster(vec![vec![
+    ///     "redis://node-a1:6379", "redis://node-a2:6379"
+    /// ]])?;
+    ///
+    /// // Multiple independent clusters (Redlock with quorum)
+    /// let lm = LockManager::new_cluster(vec![
+    ///     vec!["redis://a1:6379","redis://a2:6379"],
+    ///     vec!["redis://b1:6379","redis://b2:6379"],
+    ///     vec!["redis://c1:6379","redis://c2:6379"],
+    /// ])?;
+    /// ```
+    pub fn new_cluster<T: IntoConnectionInfo>(uris: Vec<Vec<T>>) -> Result<LockManager, LockError> {
+        let clients: Result<Vec<ClusterClient>, _> = uris
+            .into_iter()
+            .map(|cluster_uris| {
+                ClusterClient::builder(cluster_uris)
+                    .retries(3)
+                    .build()
+                    .map_err(LockError::Redis)
+            })
+            .collect();
+
+        Ok(Self::from_cluster_clients(clients?))
+    }
+
+    /// Create from standalone clients
     pub fn from_clients(clients: Vec<Client>) -> LockManager {
-        let clients: Vec<RestorableConnection> =
-            clients.into_iter().map(RestorableConnection::new).collect();
+        let clients: Vec<RestorableConnection> = clients
+            .into_iter()
+            .map(RestorableConnection::new_standalone)
+            .collect();
+
+        LockManager {
+            lock_manager_inner: Arc::new(Mutex::new(LockManagerInner { servers: clients })),
+            retry_count: DEFAULT_RETRY_COUNT,
+            retry_delay: DEFAULT_RETRY_DELAY,
+        }
+    }
+
+    /// Create from cluster clients
+    pub fn from_cluster_clients(clients: Vec<ClusterClient>) -> LockManager {
+        let clients: Vec<RestorableConnection> = clients
+            .into_iter()
+            .map(RestorableConnection::new_cluster)
+            .collect();
+
         LockManager {
             lock_manager_inner: Arc::new(Mutex::new(LockManagerInner { servers: clients })),
             retry_count: DEFAULT_RETRY_COUNT,

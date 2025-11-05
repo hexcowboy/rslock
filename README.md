@@ -10,6 +10,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 - Lock extending
 - Async runtime support (async-std and tokio)
 - Async redis
+- Support for both standalone Redis and Redis Cluster
 
 ## Install
 
@@ -45,8 +46,15 @@ async fn main() {
         "redis://127.0.0.1:6382/",
     ];
 
-    // Initialize the LockManager using `new`
+    // Initialize the LockManager using `new` for standalone Redis
     let rl = LockManager::new(uris);
+
+    // For Redis Cluster, use:
+    // let cluster_uris = vec![
+    //     vec!["redis://127.0.0.1:7000/", "redis://127.0.0.1:7001/"],
+    //     vec!["redis://127.0.0.1:7002/", "redis://127.0.0.1:7003/"],
+    // ];
+    // let rl = LockManager::new_cluster(cluster_uris)?;
 
     // Acquire a lock
     let lock = loop {
