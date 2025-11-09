@@ -368,12 +368,12 @@ impl LockManager {
     /// `uris`: list of clusters; each inner list contains the startup node URLs of **one** cluster.
     ///
     /// **Important**
-    /// - Passing **one cluster** -> this is **not Redlock**; it's a **single-store lease lock**.
+    /// - Passing **one cluster** -> this is **not Redlock**; it's a **single-store simple Redis lock**.
     /// - Passing **multiple independent clusters** (`uris.len() > 1`) -> **Redlock quorum** (≥ N/2+1).
     ///
     /// Example:
     /// ```rust
-    /// // Single cluster (lease lock, NOT Redlock)
+    /// // Single cluster (simple Redis lock, NOT Redlock)
     /// use rslock::LockManager;
     /// let lm = LockManager::new_cluster(vec![vec![
     ///     "redis://node-a1:6379", "redis://node-a2:6379"

@@ -1,0 +1,99 @@
+version: '3.8'
+
+networks:
+  cluster-net:
+
+services:
+  # CLUSTER 1
+  c1-n1:
+    image: redis:7-alpine
+    container_name: c1-n1
+    ports: ["7000:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c1-n2:
+    image: redis:7-alpine
+    container_name: c1-n2
+    ports: ["7001:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c1-n3:
+    image: redis:7-alpine
+    container_name: c1-n3
+    ports: ["7002:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  # CLUSTER 2
+  c2-n1:
+    image: redis:7-alpine
+    container_name: c2-n1
+    ports: ["7100:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c2-n2:
+    image: redis:7-alpine
+    container_name: c2-n2
+    ports: ["7101:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c2-n3:
+    image: redis:7-alpine
+    container_name: c2-n3
+    ports: ["7102:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  # CLUSTER 3
+  c3-n1:
+    image: redis:7-alpine
+    container_name: c3-n1
+    ports: ["7200:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c3-n2:
+    image: redis:7-alpine
+    container_name: c3-n2
+    ports: ["7201:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  c3-n3:
+    image: redis:7-alpine
+    container_name: c3-n3
+    ports: ["7202:6379"]
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file nodes.conf --appendonly yes
+    networks: [cluster-net]
+
+  # INIT
+  cluster-init:
+    image: redis:7-alpine
+    depends_on: [c1-n1, c1-n2, c1-n3, c2-n1, c2-n2, c2-n3, c3-n1, c3-n2, c3-n3]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sleep 5
+        redis-cli --cluster create c1-n1:6379 c1-n2:6379 c1-n3:6379 --cluster-replicas 0 --cluster-yes
+        redis-cli --cluster create c2-n1:6379 c2-n2:6379 c2-n3:6379 --cluster-replicas 0 --cluster-yes
+        redis-cli --cluster create c3-n1:6379 c3-n2:6379 c3-n3:6379 --cluster-replicas 0 --cluster-yes
+    networks: [cluster-net]
+    restart: "no"
+
+  # TEST RUNNER
+  test-runner:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile.test
+    depends_on:
+      cluster-init:
+        condition: service_completed_successfully
+    volumes: ["..:/app"]
+    working_dir: /app
+    networks: [cluster-net]
+    command: sh -c "sleep 2 && cargo run --example single_cluster && cargo run --example multi_cluster"
+    restart: "no"
