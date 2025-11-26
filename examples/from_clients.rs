@@ -5,7 +5,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() {
     // Create Redis clients
-    let uris = vec![
+    let uris = [
         "redis://127.0.0.1:6380/",
         "redis://127.0.0.1:6381/",
         "redis://127.0.0.1:6382/",

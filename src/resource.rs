@@ -5,7 +5,7 @@ pub struct LockResource<'a> {
     bytes: Cow<'a, [u8]>,
 }
 
-impl<'a> LockResource<'a> {
+impl LockResource<'_> {
     pub fn to_vec(&self) -> Vec<u8> {
         self.bytes.to_vec()
     }
@@ -71,11 +71,11 @@ impl<'a> ToLockResource<'a> for &'a [&'a [u8]] {
     }
 }
 
-impl<'a> ToRedisArgs for LockResource<'a> {
+impl ToRedisArgs for LockResource<'_> {
     fn write_redis_args<W>(&self, out: &mut W)
     where
         W: ?Sized + RedisWrite,
     {
-        self.bytes.write_redis_args(out)
+        self.bytes.write_redis_args(out);
     }
 }

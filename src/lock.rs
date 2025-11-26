@@ -74,6 +74,7 @@ type MutexGuard<'a, K> = tokio::sync::MutexGuard<'a, K>;
 /// and handles the Redis connections.
 #[derive(Debug, Clone)]
 pub struct LockManager {
+    #[allow(clippy::struct_field_names)]
     lock_manager_inner: Arc<Mutex<LockManagerInner>>,
     retry_count: u32,
     retry_delay: Duration,
@@ -86,7 +87,7 @@ struct LockManagerInner {
 }
 
 impl LockManagerInner {
-    fn get_quorum(&self) -> u32 {
+    const fn get_quorum(&self) -> u32 {
         (self.servers.len() as u32) / 2 + 1
     }
 }
@@ -105,7 +106,7 @@ impl RestorableConnection {
         }
     }
 
-    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
+    pub async fn get_connection(&self) -> Result<MultiplexedConnection, LockError> {
         let mut lock = self.con.lock().await;
         if lock.is_none() {
             *lock = Some(
@@ -115,34 +116,30 @@ impl RestorableConnection {
                     .map_err(LockError::Redis)?,
             );
         }
-        match (*lock).clone() {
-            Some(conn) => Ok(conn),
-            None => Err(LockError::RedisFailedToEstablishConnection),
-        }
+        (*lock)
+            .clone()
+            .map_or_else(|| Err(LockError::RedisFailedToEstablishConnection), Ok)
     }
 
-    pub async fn recover(&mut self, error: RedisError) -> Result<(), LockError> {
-        //We need to rebuild the connection
-        if !error.is_unrecoverable_error() {
-            Ok(())
-        } else {
-            let mut lock = self.con.lock().await;
-            *lock = Some(
+    pub async fn recover(&self, error: RedisError) -> Result<(), LockError> {
+        // We need to rebuild the connection
+        if error.is_unrecoverable_error() {
+            *self.con.lock().await = Some(
                 self.client
                     .get_multiplexed_async_connection()
                     .await
                     .map_err(LockError::Redis)?,
             );
-            Ok(())
         }
+
+        Ok(())
     }
 }
 
 impl RestorableConnection {
-    async fn lock(&mut self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
-        let mut con = match self.get_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
+    async fn lock(&self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
+        let Ok(mut con) = self.get_connection().await else {
+            return false;
         };
 
         let result: RedisResult<Value> = redis::cmd("SET")
@@ -165,10 +162,9 @@ impl RestorableConnection {
         }
     }
 
-    async fn extend(&mut self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
-        let mut con = match self.get_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
+    async fn extend(&self, resource: &LockResource<'_>, val: &[u8], ttl: usize) -> bool {
+        let Ok(mut con) = self.get_connection().await else {
+            return false;
         };
         let script = redis::Script::new(EXTEND_SCRIPT);
         let result: RedisResult<i32> = script
@@ -187,11 +183,10 @@ impl RestorableConnection {
         }
     }
 
-    async fn unlock(&mut self, resource: impl ToLockResource<'_>, val: &[u8]) -> bool {
+    async fn unlock(&self, resource: impl ToLockResource<'_>, val: &[u8]) -> bool {
         let resource = resource.to_lock_resource();
-        let mut con = match self.get_connection().await {
-            Err(_) => return false,
-            Ok(val) => val,
+        let Ok(mut con) = self.get_connection().await else {
+            return false;
         };
         let script = redis::Script::new(UNLOCK_SCRIPT);
         let result: RedisResult<i32> = script.key(resource).arg(val).invoke_async(&mut con).await;
@@ -205,7 +200,7 @@ impl RestorableConnection {
         }
     }
 
-    async fn query(&mut self, resource: &[u8]) -> RedisResult<Option<Vec<u8>>> {
+    async fn query(&self, resource: &[u8]) -> RedisResult<Option<Vec<u8>>> {
         let mut con = match self.get_connection().await {
             Ok(con) => con,
             Err(_e) => return Ok(None),
@@ -268,7 +263,8 @@ impl LockManager {
     /// Create a new lock manager instance, defined by the given Redis connection uris.
     ///
     /// Sample URI: `"redis://127.0.0.1:6379"`
-    pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> LockManager {
+    #[must_use]
+    pub fn new<T: IntoConnectionInfo>(uris: Vec<T>) -> Self {
         let servers: Vec<Client> = uris
             .into_iter()
             .map(|uri| Client::open(uri).unwrap())
@@ -279,10 +275,10 @@ impl LockManager {
 
     /// Create a new lock manager instance, defined by the given Redis clients.
     /// Quorum is defined to be N/2+1, with N being the number of given Redis instances.
-    pub fn from_clients(clients: Vec<Client>) -> LockManager {
+    pub fn from_clients(clients: Vec<Client>) -> Self {
         let clients: Vec<RestorableConnection> =
             clients.into_iter().map(RestorableConnection::new).collect();
-        LockManager {
+        Self {
             lock_manager_inner: Arc::new(Mutex::new(LockManagerInner { servers: clients })),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
@@ -302,7 +298,7 @@ impl LockManager {
     ///
     /// Retry count defaults to `3`.
     /// Retry delay defaults to `200`.
-    pub fn set_retry(&mut self, count: u32, delay: Duration) {
+    pub const fn set_retry(&mut self, count: u32, delay: Duration) {
         self.retry_count = count;
         self.retry_delay = delay;
     }
@@ -339,7 +335,9 @@ impl LockManager {
             .into_iter()
             .fold(0, |count, locked| if locked { count + 1 } else { count });
 
+            #[allow(clippy::cast_precision_loss)]
             let drift = (ttl as f32 * CLOCK_DRIFT_FACTOR) as usize + 2;
+
             let elapsed = start_time.elapsed();
             let elapsed_ms =
                 elapsed.as_secs() as usize * 1000 + elapsed.subsec_nanos() as usize / 1_000_000;
@@ -366,7 +364,7 @@ impl LockManager {
             join_all(
                 servers
                     .iter_mut()
-                    .map(|client| client.unlock(&*resource, value)),
+                    .map(|client| client.unlock(resource, value)),
             )
             .await;
 
@@ -382,7 +380,7 @@ impl LockManager {
 
                 let n = rng().random_range(0..retry_delay);
 
-                tokio::time::sleep(Duration::from_millis(n)).await
+                tokio::time::sleep(Duration::from_millis(n)).await;
             } else {
                 break;
             }
@@ -479,7 +477,7 @@ impl LockManager {
             match self.lock(resource, ttl).await {
                 Ok(lock) => return Ok(lock),
                 Err(LockError::TtlTooLarge) => return Err(LockError::TtlTooLarge),
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
     }
@@ -507,16 +505,15 @@ impl LockManager {
     /// or the value does not match), otherwise `Ok(false)`. Returns an error if a Redis
     /// connection or query fails.
     pub async fn is_freed(&self, lock: &Lock) -> Result<bool, LockError> {
-        match self.query_redis_for_key_value(&lock.resource).await? {
-            Some(val) => {
-                if val != lock.val {
-                    Err(LockError::RedisKeyMismatch)
-                } else {
+        self.query_redis_for_key_value(&lock.resource)
+            .await?
+            .map_or(Err(LockError::RedisKeyNotFound), |val| {
+                if val == lock.val {
                     Ok(false) // Key is present and matches the lock value
+                } else {
+                    Err(LockError::RedisKeyMismatch)
                 }
-            }
-            None => Err(LockError::RedisKeyNotFound), // Key does not exist
-        }
+            })
     }
 
     #[cfg(feature = "tokio-comp")]
@@ -533,18 +530,16 @@ impl LockManager {
         futures::pin_mut!(routine);
 
         loop {
-            match tokio::time::timeout(Duration::from_millis(threshold), &mut routine).await {
-                Ok(result) => {
-                    self.unlock(&lock).await;
+            if let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(threshold), &mut routine).await
+            {
+                self.unlock(&lock).await;
 
-                    return Ok(result);
-                }
-
-                Err(_) => {
-                    lock = self.extend(&lock, ttl).await?;
-                    threshold = lock.validity_time as u64 - 500;
-                }
+                return Ok(result);
             }
+
+            lock = self.extend(&lock, ttl).await?;
+            threshold = lock.validity_time as u64 - 500;
         }
     }
 }
@@ -579,7 +574,7 @@ mod tests {
                 .get_host_port_ipv4(6379)
                 .await
                 .expect("Failed to get port");
-            let address = format!("redis://localhost:{}", port);
+            let address = format!("redis://localhost:{port}");
 
             containers.push(container);
             addresses.push(address);
@@ -612,14 +607,14 @@ mod tests {
                 match client.get_multiplexed_async_connection().await {
                     Ok(mut con) => match redis::cmd("PING").query_async::<String>(&mut con).await {
                         Ok(response) => {
-                            eprintln!("Redis {} is ready: {}", address, response);
+                            eprintln!("Redis {address} is ready: {response}");
                             break; // Move to the next address
                         }
                         Err(e) => {
-                            eprintln!("Redis {} is not ready: {:?}", address, e);
+                            eprintln!("Redis {address} is not ready: {e:?}");
                         }
                     },
-                    Err(e) => eprintln!("Failed to connect to Redis {}: {:?}", address, e),
+                    Err(e) => eprintln!("Failed to connect to Redis {address}: {e:?}"),
                 }
 
                 // Decrement retries and wait before the next attempt
@@ -628,7 +623,7 @@ mod tests {
             }
 
             if retries == 0 {
-                return Err(format!("Redis {} did not become ready after retries", address).into());
+                return Err(format!("Redis {address} did not become ready after retries").into());
             }
         }
 
@@ -677,6 +672,8 @@ mod tests {
 
         assert_eq!(3, l.servers.len());
         assert_eq!(2, l.get_quorum());
+
+        drop(l);
     }
 
     #[tokio::test]
@@ -687,8 +684,10 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         assert!(!l.servers[0].unlock(&key, &val).await);
+
+        drop(l);
 
         Ok(())
     }
@@ -701,7 +700,7 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await?;
 
         redis::cmd("SET")
@@ -711,6 +710,9 @@ mod tests {
             .await?;
 
         assert!(l.servers[0].unlock(&key, &val).await);
+
+        drop(l);
+
         Ok(())
     }
 
@@ -723,11 +725,14 @@ mod tests {
         let resource = key.to_lock_resource();
 
         let val = rl.get_unique_lock_id()?;
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await?;
 
         redis::cmd("DEL").arg(&*key).exec_async(&mut con).await?;
         assert!(l.servers[0].lock(&resource, &val, 10_000).await);
+
+        drop(l);
+
         Ok(())
     }
 
@@ -739,9 +744,11 @@ mod tests {
         let key = rl.get_unique_lock_id()?;
 
         let val = rl.get_unique_lock_id()?;
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await?;
+
         drop(l);
+
         let _: () = redis::cmd("SET")
             .arg(&*key)
             .arg(&*val)
@@ -777,7 +784,7 @@ mod tests {
                     lock.validity_time
                 );
             }
-            Err(e) => panic!("{:?}", e),
+            Err(e) => panic!("{e:?}"),
         }
 
         Ok(())
@@ -805,10 +812,11 @@ mod tests {
 
         rl.unlock(&lock).await;
 
-        match rl2.lock(&key, Duration::from_millis(10_000)).await {
-            Ok(l) => assert!(l.validity_time > 0),
-            Err(_) => panic!("Lock couldn't be acquired"),
-        }
+        let l = rl2
+            .lock(&key, Duration::from_millis(10_000))
+            .await
+            .expect("Lock couldn't be acquired");
+        assert!(l.validity_time > 0);
 
         Ok(())
     }
@@ -840,10 +848,11 @@ mod tests {
         }
         .await;
 
-        match rl2.lock(&key, Duration::from_millis(10_000)).await {
-            Ok(l) => assert!(l.validity_time > 0),
-            Err(_) => panic!("Lock couldn't be acquired"),
-        }
+        let l = rl2
+            .lock(&key, Duration::from_millis(10_000))
+            .await
+            .expect("Lock couldn't be acquired");
+        assert!(l.validity_time > 0);
 
         Ok(())
     }
@@ -859,10 +868,11 @@ mod tests {
 
         async {
             //The acquire function is only enabled for `async-std-comp` ??
-            let lock_guard = rl1
-                .acquire(&key, Duration::from_millis(10_000))
+            let lock = rl1
+                .acquire_no_guard(&key, Duration::from_millis(10_000))
                 .await
                 .expect("LockManage rl1 should be able to acquire lock");
+            let lock_guard = LockGuard { lock };
             let lock = &lock_guard.lock;
             assert!(
                 lock.validity_time > 0,
@@ -887,7 +897,7 @@ mod tests {
                         );
                     }
                     Ok(None) => println!("Redis key not found. Retrying..."),
-                    Err(e) => println!("Failed to query Redis key: {:?}. Retrying...", e),
+                    Err(e) => println!("Failed to query Redis key: {e:?}. Retrying..."),
                 }
 
                 retries -= 1;
@@ -903,9 +913,10 @@ mod tests {
         }
         .await;
 
-        if let Ok(_) = rl2.lock(&key, Duration::from_millis(10_000)).await {
-            panic!("Lock couldn't be acquired");
-        }
+        assert!(
+            rl2.lock(&key, Duration::from_millis(10_000)).await.is_err(),
+            "Lock couldn't be acquired"
+        );
 
         Ok(())
     }
@@ -971,12 +982,10 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
             // Assert rl2 can lock with the key now
-            match rl2.lock(&key, Duration::from_millis(10_000)).await {
-                Err(_) => {
-                    panic!("Unexpected error when trying to claim free lock after extend expired")
-                }
-                _ => (),
-            }
+            assert!(
+                rl2.lock(&key, Duration::from_millis(10_000)).await.is_ok(),
+                "Unexpected error when trying to claim free lock after extend expired"
+            );
 
             // Also assert rl1 can't reuse lock1
             match rl1.extend(&lock1.lock, Duration::from_millis(10_000)).await {
@@ -1011,7 +1020,7 @@ mod tests {
         // Check if the error returned is TtlExceeded
         match lock_result {
             Err(LockError::TtlExceeded) => (), // Test passes
-            _ => panic!("Expected LockError::TtlExceeded, but got {:?}", lock_result),
+            _ => panic!("Expected LockError::TtlExceeded, but got {lock_result:?}"),
         }
 
         Ok(())
@@ -1025,10 +1034,10 @@ mod tests {
 
         // Too big Duration, fails - technical limit is from_millis(u64::MAX)
         let ttl = Duration::from_secs(u64::MAX);
-        match rl.lock(&key, ttl).await {
-            Ok(_) => panic!("Expected LockError::TtlTooLarge"),
-            Err(_) => (), // Test passes
-        }
+        assert!(
+            rl.lock(&key, ttl).await.is_err(),
+            "Expected LockError::TtlTooLarge"
+        );
     }
 
     #[tokio::test]
@@ -1086,8 +1095,8 @@ mod tests {
             Err(LockError::RedisKeyNotFound) => {
                 assert!(true, "RedisKeyNotFound is expected if key is missing")
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
-        };
+            Err(e) => panic!("Unexpected error: {e:?}"),
+        }
 
         let lock2 = rl
             .lock(b"resource_2", std::time::Duration::from_millis(10_000))
@@ -1100,7 +1109,7 @@ mod tests {
             Err(LockError::RedisKeyNotFound) => {
                 assert!(true, "RedisKeyNotFound is expected if key is missing")
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
     }
 
@@ -1115,8 +1124,11 @@ mod tests {
             .unwrap();
 
         // Ensure Redis key is correctly set and matches the lock value
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await.unwrap();
+
+        drop(l);
+
         let redis_val: Option<Vec<u8>> = redis::cmd("GET")
             .arg(&lock.resource)
             .query_async(&mut con)
@@ -1154,7 +1166,7 @@ mod tests {
             Err(LockError::RedisKeyNotFound) => {
                 panic!("Redis key not found should not occur for a valid lock")
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
     }
 
@@ -1173,9 +1185,9 @@ mod tests {
         match rl.is_freed(&lock).await {
             Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
             Err(LockError::RedisKeyNotFound) => {
-                assert!(true, "RedisKeyNotFound is expected if key is missing")
+                assert!(true, "RedisKeyNotFound is expected if key is missing");
             }
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
     }
 
@@ -1190,7 +1202,7 @@ mod tests {
             .unwrap();
 
         // Manually delete the key in Redis to simulate it being missing
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await.unwrap();
         drop(l);
 
@@ -1209,7 +1221,7 @@ mod tests {
                 true,
                 "RedisKeyNotFound is expected when key is missing in Redis"
             ),
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         };
     }
 
@@ -1226,16 +1238,16 @@ mod tests {
             Ok(lock) => {
                 // Since there are no clients, any check with Redis will fail
                 match rl.is_freed(&lock).await {
-                    Ok(freed) => panic!("Expected failure due to Redis connection, but got Ok with freed status: {}", freed),
+                    Ok(freed) => panic!("Expected failure due to Redis connection, but got Ok with freed status: {freed}"),
                     Err(LockError::RedisConnectionFailed) => assert!(true, "Expected RedisConnectionFailed when all Redis connections fail"),
-                    Err(e) => panic!("Unexpected error: {:?}", e),
+                    Err(e) => panic!("Unexpected error: {e:?}"),
                 }
             }
             Err(LockError::Unavailable) => {
                 // Expected error, the test should pass in this scenario
                 assert!(true);
             }
-            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+            Err(e) => panic!("Unexpected error while acquiring lock: {e:?}"),
         }
     }
 
@@ -1255,13 +1267,13 @@ mod tests {
                     "Expected RedisConnectionFailed when all Redis connections fail"
                 ),
                 Ok(_) => panic!("Expected RedisConnectionFailed, but got Ok"),
-                Err(e) => panic!("Unexpected error: {:?}", e),
+                Err(e) => panic!("Unexpected error: {e:?}"),
             },
             Err(LockError::Unavailable) => {
                 // Expected error, the test should pass in this scenario
                 assert!(true);
             }
-            Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
+            Err(e) => panic!("Unexpected error while acquiring lock: {e:?}"),
         }
     }
 
@@ -1276,7 +1288,7 @@ mod tests {
             .unwrap();
 
         // Set a different value for the same key to simulate a mismatch
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await.unwrap();
         drop(l);
         let different_value: Vec<u8> = vec![1, 2, 3, 4, 5]; // Different value
@@ -1294,7 +1306,7 @@ mod tests {
                 "Expected RedisKeyMismatch when key value does not match the lock value"
             ),
             Ok(_) => panic!("Expected RedisKeyMismatch, but got Ok"),
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         }
     }
 
@@ -1309,7 +1321,7 @@ mod tests {
             .unwrap();
 
         // Manually delete the key in Redis to simulate it being missing
-        let mut l = rl.lock_inner().await;
+        let l = rl.lock_inner().await;
         let mut con = l.servers[0].get_connection().await.unwrap();
         drop(l);
         redis::cmd("DEL")
@@ -1324,7 +1336,7 @@ mod tests {
                 "Expected RedisKeyNotFound when key is missing in Redis"
             ),
             Ok(_) => panic!("Expected RedisKeyNotFound, but got Ok"),
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         }
     }
 
@@ -1342,6 +1354,8 @@ mod tests {
         let l = lock_manager.lock_inner().await;
         assert_eq!(l.servers.len(), 3);
         assert_eq!(l.get_quorum(), 2);
+
+        drop(l);
     }
 
     #[tokio::test]
@@ -1360,5 +1374,7 @@ mod tests {
         let l = lock_manager.lock_inner().await;
         assert_eq!(l.servers.len(), 2);
         assert_eq!(l.get_quorum(), 2); // 2/2+1 still rounds to 2
+
+        drop(l);
     }
 }
