@@ -366,7 +366,7 @@ impl LockManager {
             join_all(
                 servers
                     .iter_mut()
-                    .map(|client| client.unlock(&*resource, value)),
+                    .map(|client| client.unlock(resource, value)),
             )
             .await;
 
