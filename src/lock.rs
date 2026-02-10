@@ -366,7 +366,7 @@ impl LockManager {
             join_all(
                 servers
                     .iter_mut()
-                    .map(|client| client.unlock(&*resource, value)),
+                    .map(|client| client.unlock(resource, value)),
             )
             .await;
 
@@ -392,7 +392,7 @@ impl LockManager {
     }
 
     // Query Redis for a key's value and keep trying each server until a successful result is returned
-    async fn query_redis_for_key_value(
+    pub async fn query_redis_for_key_value(
         &self,
         resource: &[u8],
     ) -> Result<Option<Vec<u8>>, LockError> {
