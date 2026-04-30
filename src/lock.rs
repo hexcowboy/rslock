@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rand::{rng, Rng, RngCore};
+use rand::{rng, Rng, RngExt};
 use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
@@ -453,7 +453,7 @@ impl LockManager {
     /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(feature = "smol-rustls-comp")]
     pub async fn acquire(
         &self,
         resource: impl ToLockResource<'_>,
@@ -813,7 +813,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
+    #[cfg(all(not(feature = "tokio-comp"), feature = "smol-rustls-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -858,7 +858,7 @@ mod tests {
         let key = rl1.get_unique_lock_id()?;
 
         async {
-            //The acquire function is only enabled for `async-std-comp` ??
+            //The acquire function is only enabled for `smol-rustls-comp` ??
             let lock_guard = rl1
                 .acquire(&key, Duration::from_millis(10_000))
                 .await
@@ -910,7 +910,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(feature = "smol-rustls-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -950,7 +950,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(feature = "smol-rustls-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock_releases() -> Result<()> {
         let (_containers, addresses) = create_clients().await;

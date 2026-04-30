@@ -8,7 +8,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 ## Features
 
 - Lock extending
-- Async runtime support (async-std and tokio)
+- Async runtime support (smol-rustls-comp and tokio)
 - Async redis
 
 ## Install
@@ -22,7 +22,7 @@ cargo add rslock --vers "~0.7.2"
 ```
 
 > [!NOTE]
-> The `default` feature of this crate will provide `async-std`. You may optionally use tokio by supplying the `tokio-comp` feature flag when installing.
+> The `default` feature of this crate will provide `smol-rustls-comp`. You may optionally use tokio by supplying the `tokio-comp` feature flag when installing.
 
 ## Build
 
