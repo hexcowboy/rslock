@@ -19,7 +19,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](https:
 
 ```bash
 # It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
-cargo add rslock --vers "~0.9.1"
+cargo add "rslock@~0.9.1"
 ```
 
 > [!NOTE]
@@ -28,7 +28,7 @@ cargo add rslock --vers "~0.9.1"
 > backend instead by disabling the default features:
 >
 > ```bash
-> cargo add rslock --vers "~0.9.1" --no-default-features --features tokio-comp
+> cargo add "rslock@~0.9.1" --no-default-features --features tokio-comp
 > ```
 
 ## Build
@@ -100,7 +100,7 @@ Enable the `cluster` feature and pass one or more seed-node URIs for one logical
 cluster. The cluster counts as one backend when `rslock` calculates quorum:
 
 ```bash
-cargo add rslock --vers "~0.9.1" --features cluster
+cargo add "rslock@~0.9.1" --features cluster
 ```
 
 For authentication, TLS, address mapping, and other advanced configuration, build a
