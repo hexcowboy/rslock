@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rand::{rng, Rng, RngCore};
+use rand::{rng, Rng, RngExt};
 use redis::aio::MultiplexedConnection;
 use redis::Value::Okay;
 use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
@@ -903,7 +903,7 @@ mod tests {
         }
         .await;
 
-        if let Ok(_) = rl2.lock(&key, Duration::from_millis(10_000)).await {
+        if rl2.lock(&key, Duration::from_millis(10_000)).await.is_ok() {
             panic!("Lock couldn't be acquired");
         }
 
@@ -971,11 +971,8 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
             // Assert rl2 can lock with the key now
-            match rl2.lock(&key, Duration::from_millis(10_000)).await {
-                Err(_) => {
-                    panic!("Unexpected error when trying to claim free lock after extend expired")
-                }
-                _ => (),
+            if rl2.lock(&key, Duration::from_millis(10_000)).await.is_err() {
+                panic!("Unexpected error when trying to claim free lock after extend expired")
             }
 
             // Also assert rl1 can't reuse lock1
@@ -1025,9 +1022,8 @@ mod tests {
 
         // Too big Duration, fails - technical limit is from_millis(u64::MAX)
         let ttl = Duration::from_secs(u64::MAX);
-        match rl.lock(&key, ttl).await {
-            Ok(_) => panic!("Expected LockError::TtlTooLarge"),
-            Err(_) => (), // Test passes
+        if rl.lock(&key, ttl).await.is_ok() {
+            panic!("Expected LockError::TtlTooLarge");
         }
     }
 
@@ -1083,9 +1079,7 @@ mod tests {
 
         match rl.is_freed(&lock1).await {
             Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
-            Err(LockError::RedisKeyNotFound) => {
-                assert!(true, "RedisKeyNotFound is expected if key is missing")
-            }
+            Err(LockError::RedisKeyNotFound) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
         };
 
@@ -1097,9 +1091,7 @@ mod tests {
 
         match rl.is_freed(&lock2).await {
             Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
-            Err(LockError::RedisKeyNotFound) => {
-                assert!(true, "RedisKeyNotFound is expected if key is missing")
-            }
+            Err(LockError::RedisKeyNotFound) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
         };
     }
@@ -1172,9 +1164,7 @@ mod tests {
 
         match rl.is_freed(&lock).await {
             Ok(freed) => assert!(freed, "Lock should be freed after unlock"),
-            Err(LockError::RedisKeyNotFound) => {
-                assert!(true, "RedisKeyNotFound is expected if key is missing")
-            }
+            Err(LockError::RedisKeyNotFound) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
         };
     }
@@ -1205,10 +1195,7 @@ mod tests {
                 freed,
                 "Lock should be marked as freed when key is missing in Redis"
             ),
-            Err(LockError::RedisKeyNotFound) => assert!(
-                true,
-                "RedisKeyNotFound is expected when key is missing in Redis"
-            ),
+            Err(LockError::RedisKeyNotFound) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
         };
     }
@@ -1227,14 +1214,11 @@ mod tests {
                 // Since there are no clients, any check with Redis will fail
                 match rl.is_freed(&lock).await {
                     Ok(freed) => panic!("Expected failure due to Redis connection, but got Ok with freed status: {}", freed),
-                    Err(LockError::RedisConnectionFailed) => assert!(true, "Expected RedisConnectionFailed when all Redis connections fail"),
+                    Err(LockError::RedisConnectionFailed) => {}
                     Err(e) => panic!("Unexpected error: {:?}", e),
                 }
             }
-            Err(LockError::Unavailable) => {
-                // Expected error, the test should pass in this scenario
-                assert!(true);
-            }
+            Err(LockError::Unavailable) => {}
             Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
         }
     }
@@ -1250,17 +1234,11 @@ mod tests {
 
         match lock_result {
             Ok(lock) => match rl.is_freed(&lock).await {
-                Err(LockError::RedisConnectionFailed) => assert!(
-                    true,
-                    "Expected RedisConnectionFailed when all Redis connections fail"
-                ),
+                Err(LockError::RedisConnectionFailed) => {}
                 Ok(_) => panic!("Expected RedisConnectionFailed, but got Ok"),
                 Err(e) => panic!("Unexpected error: {:?}", e),
             },
-            Err(LockError::Unavailable) => {
-                // Expected error, the test should pass in this scenario
-                assert!(true);
-            }
+            Err(LockError::Unavailable) => {}
             Err(e) => panic!("Unexpected error while acquiring lock: {:?}", e),
         }
     }
@@ -1289,10 +1267,7 @@ mod tests {
 
         // Now check if is_freed identifies the mismatch correctly
         match rl.is_freed(&lock).await {
-            Err(LockError::RedisKeyMismatch) => assert!(
-                true,
-                "Expected RedisKeyMismatch when key value does not match the lock value"
-            ),
+            Err(LockError::RedisKeyMismatch) => {}
             Ok(_) => panic!("Expected RedisKeyMismatch, but got Ok"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -1319,10 +1294,7 @@ mod tests {
             .unwrap();
 
         match rl.is_freed(&lock).await {
-            Err(LockError::RedisKeyNotFound) => assert!(
-                true,
-                "Expected RedisKeyNotFound when key is missing in Redis"
-            ),
+            Err(LockError::RedisKeyNotFound) => {}
             Ok(_) => panic!("Expected RedisKeyNotFound, but got Ok"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
