@@ -21,7 +21,7 @@ edition = "2021"
 [features]
 async-std-comp = ["redis/smol-rustls-comp"]
 tokio-comp = ["redis/tokio-rustls-comp"]
-cluster = ["redis/cluster-async"]
+cluster = ["async-std-comp", "redis/cluster-async"]
 default = ["async-std-comp"]
 
 [dependencies]
