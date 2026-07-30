@@ -18,7 +18,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 
 ```bash
 # It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
-cargo add rslock --vers "~0.7.2"
+cargo add rslock --vers "~0.8.0"
 ```
 
 > [!NOTE]
