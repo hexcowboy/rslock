@@ -1,7 +1,7 @@
 [package]
 
 name = "rslock"
-version = "0.8.0"
+version = "0.9.0"
 authors = [
   "Jan-Erik Rediger <badboy@archlinux.us>",
   "Romain Boces <bocesr@gmail.com>",
@@ -21,6 +21,7 @@ edition = "2021"
 [features]
 async-std-comp = ["redis/smol-rustls-comp"]
 tokio-comp = ["redis/tokio-rustls-comp"]
+cluster = ["redis/cluster-async"]
 default = ["async-std-comp"]
 
 [dependencies]
@@ -36,3 +37,7 @@ testcontainers = "0.27.3"
 anyhow = "1.0.104"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 tokio-test = "0.4.5"
+
+[[example]]
+name = "cluster"
+required-features = ["cluster"]
