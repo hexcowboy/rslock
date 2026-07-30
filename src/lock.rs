@@ -1,12 +1,19 @@
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use rand::{rng, Rng, RngExt};
-use redis::aio::MultiplexedConnection;
+use redis::aio::{ConnectionLike, MultiplexedConnection};
+#[cfg(feature = "cluster")]
+use redis::cluster::ClusterClient;
+#[cfg(feature = "cluster")]
+use redis::cluster_async::ClusterConnection;
 use redis::Value::Okay;
-use redis::{Client, IntoConnectionInfo, RedisError, RedisResult, Value};
+use redis::{
+    Client, Cmd, IntoConnectionInfo, Pipeline, RedisError, RedisFuture, RedisResult, Value,
+};
 
 use crate::resource::{LockResource, ToLockResource};
 
@@ -91,29 +98,46 @@ impl LockManagerInner {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RestorableConnection {
-    client: Client,
-    con: Arc<Mutex<Option<MultiplexedConnection>>>,
+    client: RedisClient,
+    con: Arc<Mutex<Option<RedisConnection>>>,
 }
 
 impl RestorableConnection {
     pub fn new(client: Client) -> Self {
         Self {
-            client,
+            client: RedisClient::Standalone(client),
             con: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
-    pub async fn get_connection(&mut self) -> Result<MultiplexedConnection, LockError> {
+    #[cfg(feature = "cluster")]
+    pub fn new_cluster(client: ClusterClient) -> Self {
+        Self {
+            client: RedisClient::Cluster(client),
+            con: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    async fn connect(&self) -> RedisResult<RedisConnection> {
+        match &self.client {
+            RedisClient::Standalone(client) => client
+                .get_multiplexed_async_connection()
+                .await
+                .map(RedisConnection::Standalone),
+            #[cfg(feature = "cluster")]
+            RedisClient::Cluster(client) => client
+                .get_async_connection()
+                .await
+                .map(RedisConnection::Cluster),
+        }
+    }
+
+    pub async fn get_connection(&mut self) -> Result<RedisConnection, LockError> {
         let mut lock = self.con.lock().await;
         if lock.is_none() {
-            *lock = Some(
-                self.client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_err(LockError::Redis)?,
-            );
+            *lock = Some(self.connect().await.map_err(LockError::Redis)?);
         }
         match (*lock).clone() {
             Some(conn) => Ok(conn),
@@ -127,14 +151,84 @@ impl RestorableConnection {
             Ok(())
         } else {
             let mut lock = self.con.lock().await;
-            *lock = Some(
-                self.client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_err(LockError::Redis)?,
-            );
+            *lock = Some(self.connect().await.map_err(LockError::Redis)?);
             Ok(())
         }
+    }
+}
+
+#[derive(Clone)]
+enum RedisClient {
+    Standalone(Client),
+    #[cfg(feature = "cluster")]
+    Cluster(ClusterClient),
+}
+
+impl fmt::Debug for RedisClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Standalone(_) => formatter.write_str("Standalone"),
+            #[cfg(feature = "cluster")]
+            Self::Cluster(_) => formatter.write_str("Cluster"),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum RedisConnection {
+    Standalone(MultiplexedConnection),
+    #[cfg(feature = "cluster")]
+    Cluster(ClusterConnection),
+}
+
+impl fmt::Debug for RedisConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Standalone(_) => formatter.write_str("Standalone"),
+            #[cfg(feature = "cluster")]
+            Self::Cluster(_) => formatter.write_str("Cluster"),
+        }
+    }
+}
+
+impl ConnectionLike for RedisConnection {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
+        match self {
+            Self::Standalone(connection) => connection.req_packed_command(cmd),
+            #[cfg(feature = "cluster")]
+            Self::Cluster(connection) => connection.req_packed_command(cmd),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        pipeline: &'a Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        match self {
+            Self::Standalone(connection) => connection.req_packed_commands(pipeline, offset, count),
+            #[cfg(feature = "cluster")]
+            Self::Cluster(connection) => connection.req_packed_commands(pipeline, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            Self::Standalone(connection) => connection.get_db(),
+            #[cfg(feature = "cluster")]
+            Self::Cluster(connection) => connection.get_db(),
+        }
+    }
+}
+
+impl fmt::Debug for RestorableConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RestorableConnection")
+            .field("client", &self.client)
+            .field("con", &self.con)
+            .finish()
     }
 }
 
@@ -284,6 +378,30 @@ impl LockManager {
             clients.into_iter().map(RestorableConnection::new).collect();
         LockManager {
             lock_manager_inner: Arc::new(Mutex::new(LockManagerInner { servers: clients })),
+            retry_count: DEFAULT_RETRY_COUNT,
+            retry_delay: DEFAULT_RETRY_DELAY,
+        }
+    }
+
+    /// Create a lock manager backed by one Redis Cluster.
+    ///
+    /// The URIs are seed nodes for the same logical cluster, so the cluster counts as one server
+    /// when calculating quorum. Enable the `cluster` crate feature to use this constructor.
+    #[cfg(feature = "cluster")]
+    pub fn new_cluster<T: IntoConnectionInfo>(uris: Vec<T>) -> RedisResult<LockManager> {
+        ClusterClient::new(uris).map(Self::from_cluster_client)
+    }
+
+    /// Create a lock manager from a configured Redis Cluster client.
+    ///
+    /// Use this constructor when the cluster needs authentication, TLS, address remapping, or
+    /// other options exposed by [`redis::cluster::ClusterClientBuilder`].
+    #[cfg(feature = "cluster")]
+    pub fn from_cluster_client(client: ClusterClient) -> LockManager {
+        LockManager {
+            lock_manager_inner: Arc::new(Mutex::new(LockManagerInner {
+                servers: vec![RestorableConnection::new_cluster(client)],
+            })),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: DEFAULT_RETRY_DELAY,
         }
@@ -552,6 +670,12 @@ impl LockManager {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
+    #[cfg(feature = "cluster")]
+    use redis::cluster::{ClusterClientBuilder, NodeAddress};
+    #[cfg(feature = "cluster")]
+    use std::collections::HashMap;
+    #[cfg(feature = "cluster")]
+    use testcontainers::ImageExt;
     use testcontainers::{
         core::{IntoContainerPort, WaitFor},
         runners::AsyncRunner,
@@ -644,6 +768,82 @@ mod tests {
         is_normal::<LockError>();
         is_normal::<Lock>();
         is_normal::<LockGuard>();
+    }
+
+    #[cfg(feature = "cluster")]
+    #[test]
+    fn test_new_cluster_validates_seed_nodes() {
+        assert!(LockManager::new_cluster(vec!["not-a-redis-uri"]).is_err());
+    }
+
+    #[cfg(feature = "cluster")]
+    #[tokio::test]
+    async fn test_cluster_lock_lifecycle() -> Result<()> {
+        const CLUSTER_PORTS: [u16; 6] = [7000, 7001, 7002, 7003, 7004, 7005];
+
+        let mut image =
+            GenericImage::new("grokzen/redis-cluster", "7.2.5").with_wait_for(WaitFor::seconds(10));
+
+        for port in CLUSTER_PORTS {
+            image = image.with_exposed_port(port.tcp());
+        }
+
+        let container = image
+            .with_env_var("IP", "127.0.0.1")
+            .with_env_var("LANG", "C.UTF-8")
+            .with_env_var("LC_ALL", "C.UTF-8")
+            .start()
+            .await
+            .expect("Failed to start Redis Cluster container");
+        let host = container.get_host().await?.to_string();
+        let mut address_map = HashMap::new();
+
+        for port in CLUSTER_PORTS {
+            address_map.insert(
+                NodeAddress::new("127.0.0.1", port),
+                NodeAddress::new(host.clone(), container.get_host_port_ipv4(port).await?),
+            );
+        }
+
+        let seed_port = container.get_host_port_ipv4(CLUSTER_PORTS[0]).await?;
+        let seed = format!("redis://{host}:{seed_port}/");
+        let client = ClusterClientBuilder::new([seed])
+            .node_address_map(address_map)
+            .build()?;
+        let manager = LockManager::from_cluster_client(client);
+        let mut inner = manager.lock_inner().await;
+        if let Err(error) = inner.servers[0].get_connection().await {
+            eprintln!(
+                "Redis Cluster stdout:\n{}",
+                String::from_utf8_lossy(&container.stdout_to_vec().await?)
+            );
+            eprintln!(
+                "Redis Cluster stderr:\n{}",
+                String::from_utf8_lossy(&container.stderr_to_vec().await?)
+            );
+            return Err(error.into());
+        }
+        drop(inner);
+
+        let lock = manager
+            .lock("cluster-lock-lifecycle", Duration::from_secs(10))
+            .await?;
+        assert_eq!(
+            manager.query_redis_for_key_value(&lock.resource).await?,
+            Some(lock.val.clone())
+        );
+
+        let extended = manager.extend(&lock, Duration::from_secs(10)).await?;
+        assert!(extended.validity_time > 0);
+
+        manager.unlock(&extended).await;
+        assert_eq!(
+            manager.query_redis_for_key_value(&lock.resource).await?,
+            None
+        );
+
+        drop(container);
+        Ok(())
     }
 
     #[tokio::test]

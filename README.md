@@ -10,6 +10,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 - Lock extending
 - Async runtime support (async-std and tokio)
 - Async redis
+- Redis Cluster support
 
 ## Install
 
@@ -18,7 +19,7 @@ This is an implementation of Redlock, the [distributed locking mechanism](http:/
 
 ```bash
 # It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
-cargo add rslock --vers "~0.8.0"
+cargo add rslock --vers "~0.9.0"
 ```
 
 > [!NOTE]
@@ -73,6 +74,25 @@ async fn main() {
 }
 ```
 
+### Redis Cluster
+
+Enable the `cluster` feature and pass one or more seed-node URIs for the same cluster:
+
+```bash
+cargo add rslock --vers "~0.9.0" --features cluster
+```
+
+```rust
+let manager = LockManager::new_cluster(vec![
+    "redis://127.0.0.1:7000/",
+    "redis://127.0.0.1:7001/",
+    "redis://127.0.0.1:7002/",
+])?;
+```
+
+For authentication, TLS, address mapping, and other advanced configuration, build a
+`redis::cluster::ClusterClient` and pass it to `LockManager::from_cluster_client`.
+
 ## Extending Locks
 
 Extending a lock effectively renews its duration instead of adding extra time to it. For instance, if a 1000ms lock is extended by 1000ms after 500ms pass, it will only last for a total of 1500ms, not 2000ms. This approach is consistent with the [Node.js Redlock implementation](https://www.npmjs.com/package/redlock). See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/lock.rs#L22-L30).
@@ -99,6 +119,7 @@ Run the examples:
 cargo run --example basic
 cargo run --example shared_lock
 cargo run --example from_clients
+cargo run --example cluster --features cluster
 ```
 
 Stop the redis servers:
