@@ -22,7 +22,9 @@ edition = "2021"
 async-std-comp = ["redis/smol-rustls-comp"]
 tokio-comp = ["redis/tokio-rustls-comp"]
 cluster = ["async-std-comp", "redis/cluster-async"]
-default = ["async-std-comp"]
+# By default, no async runtime support is enabled.
+# Please enable `tokio-comp` or `async-std-comp` depending on which your project is using.
+default = []
 
 [dependencies]
 redis = { version = "1.5.0" }
