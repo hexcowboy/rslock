@@ -106,33 +106,6 @@ cargo add "rslock@~0.10.0" --features cluster,tokio-comp
 For authentication, TLS, address mapping, and other advanced configuration, build a
 `redis::cluster::ClusterClient` and pass it to `LockManager::from_cluster_client`.
 
-## Migrating to 0.10
-
-- Choose `tokio-comp` or `smol-comp` explicitly. Defaults are empty, and `cluster`
-  requires a runtime selection too. `async-std-comp` remains an alias for `smol-comp`.
-- Guards no longer unlock on drop. Call `guard.release().await` before returning,
-  including error paths. A panic, cancelled future, or dropped guard leaves the
-  Redis key until its TTL expires.
-- `acquire`, `acquire_no_guard`, and `using` are available on both runtimes.
-  An owned `Lock` also has `release().await`; shared locks can still use
-  `manager.unlock(&lock).await`.
-
-Release consumes the lock or guard and returns `()`. It awaits best-effort cleanup
-on all backends, just like `unlock`; it does not confirm deletion on unreachable
-servers. TTL remains the fallback. Keep work within the lock's validity period,
-renewing it as needed.
-
-`using` renews the lock while its routine runs and attempts release when the
-routine finishes or renewal fails. For example, on either runtime:
-
-```rust
-let result = manager.using(b"resource", Duration::from_secs(10), async || {
-    do_work().await
-}).await?;
-```
-
-Cancellation and panic still rely on TTL expiry. There is no background cleanup.
-
 ## Extending Locks
 
 Extending a lock effectively renews its duration instead of adding extra time to it. For instance, if a 1000ms lock is extended by 1000ms after 500ms pass, it will only last for a total of 1500ms, not 2000ms. This approach is consistent with the [Node.js Redlock implementation](https://www.npmjs.com/package/redlock). See the [extend script](https://github.com/hexcowboy/rslock/blob/main/src/lock.rs#L30-L40).
