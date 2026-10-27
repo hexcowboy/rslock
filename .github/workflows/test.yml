@@ -24,6 +24,8 @@ jobs:
       # https://twitter.com/jonhoo/status/1571290371124260865
       - name: cargo test --locked --all-features --all-targets -- --test-threads=4
         run: cargo test --locked --all-features --all-targets -- --test-threads=4
+      - name: Test documentation examples
+        run: cargo test --locked --all-features --doc
   runtimes:
     runs-on: ubuntu-latest
     name: ubuntu / stable / ${{ matrix.features }}

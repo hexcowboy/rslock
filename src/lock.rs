@@ -329,33 +329,51 @@ pub struct Lock {
     pub lock_manager: LockManager,
 }
 
-/// Upon dropping the guard, `LockManager::unlock` will be ran synchronously on the executor.
+impl Lock {
+    /// Consume this lock and attempt to release it on every Redis backend.
+    ///
+    /// Like [`LockManager::unlock`], release is best effort: unreachable backends
+    /// retain the key until its TTL expires. Await this future to attempt cleanup.
+    /// Dropping the lock or cancelling release performs no further network I/O.
+    pub async fn release(self) {
+        self.lock_manager.unlock(&self).await;
+    }
+}
+
+/// A distributed lock acquired through [`LockManager::acquire`].
 ///
-/// This is known to block the tokio runtime if this happens inside of the context of a tokio runtime
-/// if `tokio-comp` is enabled as a feature on this crate or the `redis` crate.
-///
-/// To eliminate this risk, if the `tokio-comp` flag is enabled, the `Drop` impl will not be compiled,
-/// meaning that dropping the `LockGuard` will be a no-op.
-/// Under this circumstance, `LockManager::unlock` can be called manually using the inner `lock` at the appropriate
-/// point to release the lock taken in `Redis`.
+/// Call [`Self::release`] and await it when finished. Dropping a guard does not
+/// release it; the Redis key remains until its TTL expires. This behavior is
+/// identical for every runtime and feature combination.
 #[derive(Debug)]
+#[must_use = "call release().await when finished; dropping a guard leaves the key until its TTL expires"]
 pub struct LockGuard {
     pub lock: Lock,
+}
+
+impl LockGuard {
+    /// Consume this guard and attempt to release its lock on every Redis backend.
+    ///
+    /// Release is best effort, with the same semantics as [`Lock::release`].
+    /// On early returns, explicitly release the guard before propagating errors.
+    /// Cancellation or panic leaves the key until its TTL expires.
+    ///
+    /// ```no_run
+    /// # async fn example(manager: &rslock::LockManager) -> Result<(), rslock::LockError> {
+    /// let guard = manager.acquire("resource", std::time::Duration::from_secs(10)).await?;
+    /// // Work while the lock is valid.
+    /// guard.release().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn release(self) {
+        self.lock.release().await;
+    }
 }
 
 enum Operation {
     Lock,
     Extend,
-}
-
-/// Dropping this guard inside the context of a tokio runtime if `tokio-comp` is enabled
-/// will block the tokio runtime.
-/// Because of this, the guard is not compiled if `tokio-comp` is enabled.
-#[cfg(not(feature = "tokio-comp"))]
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        futures::executor::block_on(self.lock.lock_manager.unlock(&self.lock));
-    }
 }
 
 impl LockManager {
@@ -568,8 +586,8 @@ impl LockManager {
 
     /// Loops until the lock is acquired.
     ///
-    /// The guard unlocks on drop only when `tokio-comp` is disabled.
-    /// With `tokio-comp`, explicitly call [`Self::unlock`] with the guard's inner lock.
+    /// Call [`LockGuard::release`] and await it when finished. Dropping the guard
+    /// leaves the Redis key until its TTL expires.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
     pub async fn acquire(
@@ -637,7 +655,11 @@ impl LockManager {
         }
     }
 
-    #[cfg(feature = "tokio-comp")]
+    /// Run a routine while holding a lock, renewing it as needed.
+    ///
+    /// Attempts to release the lock when the routine finishes or renewal fails.
+    /// Cancelling this future or panicking in the routine leaves the key until
+    /// its TTL expires. Works identically on Tokio and Smol.
     pub async fn using<R>(
         &self,
         resource: &[u8],
@@ -645,23 +667,24 @@ impl LockManager {
         routine: impl AsyncFnOnce() -> R,
     ) -> Result<R, LockError> {
         let mut lock = self.acquire_no_guard(resource, ttl).await?;
-        let mut threshold = lock.validity_time as u64 - 500;
-
         let routine = routine();
         futures::pin_mut!(routine);
 
         loop {
-            match tokio::time::timeout(Duration::from_millis(threshold), &mut routine).await {
-                Ok(result) => {
-                    self.unlock(&lock).await;
-
+            let threshold = (lock.validity_time as u64).saturating_sub(500).max(1);
+            let delay = futures_timer::Delay::new(Duration::from_millis(threshold));
+            match futures::future::select(&mut routine, delay).await {
+                futures::future::Either::Left((result, _)) => {
+                    lock.release().await;
                     return Ok(result);
                 }
-
-                Err(_) => {
-                    lock = self.extend(&lock, ttl).await?;
-                    threshold = lock.validity_time as u64 - 500;
-                }
+                futures::future::Either::Right(_) => match self.extend(&lock, ttl).await {
+                    Ok(extended) => lock = extended,
+                    Err(error) => {
+                        lock.release().await;
+                        return Err(error);
+                    }
+                },
             }
         }
     }
@@ -735,7 +758,28 @@ mod tests {
                 let extended = manager.extend(&lock, Duration::from_secs(10)).await?;
                 manager.unlock(&extended).await;
                 let next = manager.lock("smol-native", Duration::from_secs(10)).await?;
-                manager.unlock(&next).await;
+                next.release().await;
+                let guard = manager
+                    .acquire("smol-guard", Duration::from_secs(10))
+                    .await?;
+                guard.release().await;
+                assert_eq!(
+                    manager.query_redis_for_key_value(b"smol-guard").await?,
+                    None
+                );
+                assert_eq!(
+                    manager
+                        .using(b"smol-using", Duration::from_millis(800), async || {
+                            futures_timer::Delay::new(Duration::from_millis(1100)).await;
+                            42
+                        })
+                        .await?,
+                    42
+                );
+                assert_eq!(
+                    manager.query_redis_for_key_value(b"smol-using").await?,
+                    None
+                );
                 Ok::<_, LockError>(())
             })
         })
@@ -1040,103 +1084,134 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(not(feature = "tokio-comp"), feature = "smol-comp"))]
     #[tokio::test]
-    async fn test_lock_lock_unlock_raii() -> Result<()> {
+    async fn test_guard_release_unlocks() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
-
-        let rl = LockManager::new(addresses.clone());
-        let rl2 = LockManager::new(addresses.clone());
-        let key = rl.get_unique_lock_id()?;
-
-        async {
-            let lock_guard = rl
-                .acquire(&key, Duration::from_millis(10_000))
-                .await
-                .unwrap();
-            let lock = &lock_guard.lock;
-            assert!(
-                lock.validity_time > 0,
-                "validity time: {}",
-                lock.validity_time
-            );
-
-            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
-                panic!("Lock acquired, even though it should be locked")
-            }
-        }
-        .await;
-
-        match rl2.lock(&key, Duration::from_millis(10_000)).await {
-            Ok(l) => assert!(l.validity_time > 0),
-            Err(_) => panic!("Lock couldn't be acquired"),
-        }
-
+        let manager = LockManager::new(addresses);
+        let guard = manager
+            .acquire("guard-release", Duration::from_secs(10))
+            .await?;
+        assert!(manager
+            .query_redis_for_key_value(b"guard-release")
+            .await?
+            .is_some());
+        guard.release().await;
+        assert_eq!(
+            manager.query_redis_for_key_value(b"guard-release").await?,
+            None
+        );
+        manager
+            .lock("guard-release", Duration::from_secs(10))
+            .await?
+            .release()
+            .await;
         Ok(())
     }
 
-    #[cfg(feature = "tokio-comp")]
     #[tokio::test]
-    async fn test_lock_raii_does_not_unlock_with_tokio_enabled() -> Result<()> {
+    async fn test_release_preserves_a_different_owner() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
-
-        let rl1 = LockManager::new(addresses.clone());
-        let rl2 = LockManager::new(addresses.clone());
-        let key = rl1.get_unique_lock_id()?;
-
-        async {
-            let lock_guard = rl1
-                .acquire(&key, Duration::from_millis(10_000))
-                .await
-                .expect("LockManage rl1 should be able to acquire lock");
-            let lock = &lock_guard.lock;
-            assert!(
-                lock.validity_time > 0,
-                "validity time: {}",
-                lock.validity_time
-            );
-
-            // Retry verifying the Redis key state up to 5 times with a 1000ms delay
-            let mut retries = 5;
-            let mut redis_key_verified = false;
-
-            while retries > 0 {
-                match rl1.query_redis_for_key_value(&key).await {
-                    Ok(Some(redis_val)) if redis_val == lock.val => {
-                        redis_key_verified = true;
-                        break;
-                    }
-                    Ok(Some(redis_val)) => {
-                        println!(
-                            "Redis key value mismatch. Expected: {:?}, Found: {:?}. Retrying...",
-                            lock.val, redis_val
-                        );
-                    }
-                    Ok(None) => println!("Redis key not found. Retrying..."),
-                    Err(e) => println!("Failed to query Redis key: {:?}. Retrying...", e),
-                }
-
-                retries -= 1;
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-            }
-
-            // Acquire lock2 and assert it can't be acquired
-            if let Ok(_l) = rl2.lock(&key, Duration::from_millis(10_000)).await {
-                panic!("Lock acquired, even though it should be locked")
-            }
-
-            assert!(redis_key_verified);
+        let manager = LockManager::new(addresses);
+        let guard = manager
+            .acquire("release-owner", Duration::from_secs(10))
+            .await?;
+        let mut servers = manager.lock_inner().await.servers.clone();
+        for server in &mut servers {
+            let mut connection = server.get_connection().await?;
+            redis::cmd("SET")
+                .arg("release-owner")
+                .arg("new-owner")
+                .arg("PX")
+                .arg(10_000)
+                .query_async::<()>(&mut connection)
+                .await?;
         }
-        .await;
-
-        if rl2.lock(&key, Duration::from_millis(10_000)).await.is_ok() {
-            panic!("Lock couldn't be acquired");
-        }
-
+        guard.release().await;
+        assert_eq!(
+            manager.query_redis_for_key_value(b"release-owner").await?,
+            Some(b"new-owner".to_vec())
+        );
         Ok(())
     }
 
-    #[cfg(feature = "smol-comp")]
+    #[tokio::test]
+    async fn test_cancelling_using_leaves_key() -> Result<()> {
+        let (_containers, addresses) = create_clients().await;
+        let manager = LockManager::new(addresses);
+        let (ready, entered) = futures::channel::oneshot::channel();
+        let using =
+            Box::pin(
+                manager.using(b"using-cancel", Duration::from_secs(10), async move || {
+                    ready.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                }),
+            );
+        match futures::future::select(using, entered).await {
+            futures::future::Either::Right((Ok(()), using)) => drop(using),
+            _ => panic!("routine should remain pending after acquiring the lock"),
+        }
+        assert!(manager
+            .query_redis_for_key_value(b"using-cancel")
+            .await?
+            .is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_dropping_guard_leaves_key_until_ttl() -> Result<()> {
+        let (_containers, addresses) = create_clients().await;
+        let manager = LockManager::new(addresses);
+        let guard = manager
+            .acquire("guard-drop", Duration::from_millis(500))
+            .await?;
+        let value = guard.lock.val.clone();
+        drop(guard);
+        assert_eq!(
+            manager.query_redis_for_key_value(b"guard-drop").await?,
+            Some(value)
+        );
+        futures_timer::Delay::new(Duration::from_millis(600)).await;
+        assert_eq!(
+            manager.query_redis_for_key_value(b"guard-drop").await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_using_renews_and_releases() -> Result<()> {
+        let (_containers, addresses) = create_clients().await;
+        let manager = LockManager::new(addresses);
+        let result = manager
+            .using(b"using-renewal", Duration::from_millis(800), async || {
+                futures_timer::Delay::new(Duration::from_millis(1100)).await;
+                assert!(manager
+                    .query_redis_for_key_value(b"using-renewal")
+                    .await
+                    .unwrap()
+                    .is_some());
+                42
+            })
+            .await?;
+        assert_eq!(result, 42);
+        assert_eq!(
+            manager.query_redis_for_key_value(b"using-renewal").await?,
+            None
+        );
+        // A short TTL previously underflowed the renewal threshold.
+        assert_eq!(
+            manager
+                .using(b"using-short", Duration::from_millis(100), async || 7)
+                .await?,
+            7
+        );
+        assert_eq!(
+            manager.query_redis_for_key_value(b"using-short").await?,
+            None
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_lock_extend_lock() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -1176,7 +1251,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "smol-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock_releases() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
