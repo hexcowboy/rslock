@@ -22,41 +22,26 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       # https://twitter.com/jonhoo/status/1571290371124260865
-      - name: cargo test --locked --all-features --all-targets
-        run: cargo test --locked --all-features --all-targets
-  # Not all tests run with the --all-features flag. 
-  # This job is to ensure that tests that pertain only to the default feature set are run.
-  default-features:
+      - name: cargo test --locked --all-features --all-targets -- --test-threads=4
+        run: cargo test --locked --all-features --all-targets -- --test-threads=4
+  runtimes:
     runs-on: ubuntu-latest
-    name: ubuntu / stable / default-features 
+    name: ubuntu / stable / ${{ matrix.features }}
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [tokio-comp, smol-comp, async-std-comp, 'tokio-comp,cluster', 'smol-comp,cluster']
     steps:
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
-      - name: Install stable 
-        uses: dtolnay/rust-toolchain@stable
-      - name: cargo generate-lockfile
-        if: hashFiles('Cargo.lock') == ''
-        run: cargo generate-lockfile
-      - name: cargo test --locked
-        run: cargo test --locked --all-targets
-  # minimal:
-  #   runs-on: ubuntu-latest
-  #   name: ubuntu / stable / minimal-versions
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #       with:
-  #         submodules: true
-  #     - name: Install stable
-  #       uses: dtolnay/rust-toolchain@stable
-  #     - name: Install nightly for -Zminimal-versions
-  #       uses: dtolnay/rust-toolchain@nightly
-  #     - name: rustup default stable
-  #       run: rustup default stable
-  #     - name: cargo update -Zminimal-versions
-  #       run: cargo +nightly update -Zminimal-versions
-  #     - name: cargo test
-  #       run: cargo test --locked --all-features --all-targets
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --features ${{ matrix.features }} --all-targets -- --test-threads=4
+  no-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --no-default-features --all-targets
+      - run: cargo check --no-default-features --features cluster --all-targets
   coverage:
     runs-on: ubuntu-latest
     name: ubuntu / stable / coverage
