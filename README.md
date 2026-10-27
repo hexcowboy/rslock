@@ -19,22 +19,25 @@ This is an implementation of Redlock, the [distributed locking mechanism](https:
 
 ```bash
 # It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
-cargo add "rslock@~0.9.1"
+cargo add "rslock@~0.9.1" --features tokio-comp
 ```
 
-> [!NOTE]
-> The default `async-std-comp` feature uses Redis's Smol backend with Rustls. The feature
-> name is retained for compatibility. For standalone Redis, you can select Redis's Tokio
-> backend instead by disabling the default features:
->
-> ```bash
-> cargo add "rslock@~0.9.1" --no-default-features --features tokio-comp
-> ```
+Select a runtime explicitly; no runtime is enabled by default:
+
+```bash
+cargo add "rslock@~0.9.1" --features tokio-comp
+# Or use Smol:
+cargo add "rslock@~0.9.1" --features smol-comp
+```
+
+Both backends include Rustls TLS support and can be enabled together. `async-std-comp`
+is retained as an alias for `smol-comp`; Redis no longer has a separate async-std backend.
+When both backends are enabled, Redis uses Tokio inside a Tokio runtime and Smol otherwise.
 
 ## Build
 
 ```
-cargo build --release
+cargo build --release --features tokio-comp
 ```
 
 ## Usage
@@ -92,15 +95,16 @@ More examples:
 - [Basic locking](examples/basic.rs)
 - [Creating a manager from Redis clients](examples/from_clients.rs)
 - [Sharing a lock between tasks](examples/shared_lock.rs)
+- [Smol runtime](examples/smol.rs)
 - [Using Redis Cluster](examples/cluster.rs)
 
 ### Redis Cluster
 
-Enable the `cluster` feature and pass one or more seed-node URIs for one logical
+Enable `cluster` together with a runtime feature and pass one or more seed-node URIs for one logical
 cluster. The cluster counts as one backend when `rslock` calculates quorum:
 
 ```bash
-cargo add "rslock@~0.9.1" --features cluster
+cargo add "rslock@~0.9.1" --features cluster,tokio-comp
 ```
 
 For authentication, TLS, address mapping, and other advanced configuration, build a
@@ -113,11 +117,13 @@ Extending a lock effectively renews its duration instead of adding extra time to
 ## Tests
 
 The integration tests use Testcontainers and require Docker. Run both the all-features
-and default-feature test configurations:
+and each runtime configuration:
 
 ```bash
 cargo test --all-features --all-targets
-cargo test --all-targets
+cargo test --features tokio-comp --all-targets
+cargo test --features smol-comp --all-targets
+cargo check --no-default-features --all-targets
 ```
 
 ## Running the examples
@@ -131,9 +137,10 @@ docker compose -f examples/docker-compose.yml up -d
 Run the standalone Redis examples:
 
 ```bash
-cargo run --example basic
-cargo run --example shared_lock
-cargo run --example from_clients
+cargo run --example basic --features tokio-comp
+cargo run --example shared_lock --features tokio-comp
+cargo run --example from_clients --features tokio-comp
+cargo run --example smol --features smol-comp
 ```
 
 Stop the redis servers:
@@ -146,7 +153,7 @@ To run the [Redis Cluster example](examples/cluster.rs), first start a Redis Clu
 with seed nodes on ports 7000–7002, then run:
 
 ```bash
-cargo run --example cluster --features cluster
+cargo run --example cluster --features cluster,tokio-comp
 ```
 
 ## Contribute

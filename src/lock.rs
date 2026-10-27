@@ -71,7 +71,7 @@ pub enum LockError {
     MutexPoisoned,
 }
 
-//This is in place to make it easier to swap to just an std-async io implementaiton ??
+// Tokio synchronization primitives do not require a Tokio runtime.
 type Mutex<T> = tokio::sync::Mutex<T>;
 type MutexGuard<'a, K> = tokio::sync::MutexGuard<'a, K>;
 
@@ -107,7 +107,7 @@ struct RestorableConnection {
 impl RestorableConnection {
     pub fn new(client: Client) -> Self {
         Self {
-            client: RedisClient::Standalone(client),
+            client: RedisClient::Standalone(Box::new(client)),
             con: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -115,7 +115,7 @@ impl RestorableConnection {
     #[cfg(feature = "cluster")]
     pub fn new_cluster(client: ClusterClient) -> Self {
         Self {
-            client: RedisClient::Cluster(client),
+            client: RedisClient::Cluster(Box::new(client)),
             con: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -159,9 +159,9 @@ impl RestorableConnection {
 
 #[derive(Clone)]
 enum RedisClient {
-    Standalone(Client),
+    Standalone(Box<Client>),
     #[cfg(feature = "cluster")]
-    Cluster(ClusterClient),
+    Cluster(Box<ClusterClient>),
 }
 
 impl fmt::Debug for RedisClient {
@@ -500,7 +500,7 @@ impl LockManager {
 
                 let n = rng().random_range(0..retry_delay);
 
-                tokio::time::sleep(Duration::from_millis(n)).await
+                futures_timer::Delay::new(Duration::from_millis(n)).await
             } else {
                 break;
             }
@@ -568,10 +568,10 @@ impl LockManager {
 
     /// Loops until the lock is acquired.
     ///
-    /// The lock is placed in a guard that will unlock the lock when the guard is dropped.
+    /// The guard unlocks on drop only when `tokio-comp` is disabled.
+    /// With `tokio-comp`, explicitly call [`Self::unlock`] with the guard's inner lock.
     ///
     /// May return `LockError::TtlTooLarge` if `ttl` is too large.
-    #[cfg(feature = "async-std-comp")]
     pub async fn acquire(
         &self,
         resource: impl ToLockResource<'_>,
@@ -715,6 +715,33 @@ mod tests {
             .expect("Redis instances are not ready");
 
         (containers, addresses)
+    }
+
+    // Run without entering Tokio, even when both Redis backends are enabled.
+    #[cfg(feature = "smol-comp")]
+    #[tokio::test]
+    async fn test_smol_without_tokio_runtime() -> Result<()> {
+        let (_containers, addresses) = create_clients().await;
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            smol::block_on(async move {
+                let mut manager = LockManager::new(addresses);
+                manager.set_retry(2, Duration::from_millis(10));
+                let lock = manager.lock("smol-native", Duration::from_secs(10)).await?;
+                assert!(matches!(
+                    manager.lock("smol-native", Duration::from_secs(10)).await,
+                    Err(LockError::Unavailable)
+                ));
+                let extended = manager.extend(&lock, Duration::from_secs(10)).await?;
+                manager.unlock(&extended).await;
+                let next = manager.lock("smol-native", Duration::from_secs(10)).await?;
+                manager.unlock(&next).await;
+                Ok::<_, LockError>(())
+            })
+        })
+        .join()
+        .expect("Smol thread panicked")?;
+        Ok(())
     }
 
     /// This function connects to each Redis instance and sends a `PING` command to verify its readiness.
@@ -1013,7 +1040,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
+    #[cfg(all(not(feature = "tokio-comp"), feature = "smol-comp"))]
     #[tokio::test]
     async fn test_lock_lock_unlock_raii() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -1058,7 +1085,6 @@ mod tests {
         let key = rl1.get_unique_lock_id()?;
 
         async {
-            //The acquire function is only enabled for `async-std-comp` ??
             let lock_guard = rl1
                 .acquire(&key, Duration::from_millis(10_000))
                 .await
@@ -1110,7 +1136,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(feature = "smol-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
@@ -1150,7 +1176,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "async-std-comp")]
+    #[cfg(feature = "smol-comp")]
     #[tokio::test]
     async fn test_lock_extend_lock_releases() -> Result<()> {
         let (_containers, addresses) = create_clients().await;
