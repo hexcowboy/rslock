@@ -20,22 +20,25 @@ async fn main() {
     let rl = LockManager::from_clients(clients);
 
     // Acquire a lock
-    let lock = loop {
-        if let Ok(lock) = rl.lock("mutex", Duration::from_millis(1000)).await {
-            break lock;
-        }
-    };
+    let guard = rl
+        .acquire("mutex", Duration::from_millis(1000))
+        .await
+        .expect("Failed to acquire lock");
 
     println!("Lock acquired!");
 
     // Extend the lock
-    if rl.extend(&lock, Duration::from_millis(1000)).await.is_ok() {
+    if rl
+        .extend(&guard.lock, Duration::from_millis(1000))
+        .await
+        .is_ok()
+    {
         println!("Lock extended!");
     } else {
         println!("Failed to extend the lock.");
     }
 
     // Unlock the lock
-    rl.unlock(&lock).await;
+    guard.release().await;
     println!("Lock released!");
 }

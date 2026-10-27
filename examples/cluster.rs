@@ -11,12 +11,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "redis://127.0.0.1:7002/",
     ])?;
 
-    let lock = manager
-        .lock("cluster-example", Duration::from_secs(10))
+    let guard = manager
+        .acquire("cluster-example", Duration::from_secs(10))
         .await?;
 
     println!("Lock acquired");
-    manager.unlock(&lock).await;
+    guard.release().await;
     println!("Lock released");
 
     Ok(())

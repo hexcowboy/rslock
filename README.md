@@ -19,15 +19,15 @@ This is an implementation of Redlock, the [distributed locking mechanism](https:
 
 ```bash
 # It is recommended to pin the version to a minor release, as breaking changes may be introduced between minor versions before 1.0.0.
-cargo add "rslock@~0.9.1" --features tokio-comp
+cargo add "rslock@~0.10.0" --features tokio-comp
 ```
 
 Select a runtime explicitly; no runtime is enabled by default:
 
 ```bash
-cargo add "rslock@~0.9.1" --features tokio-comp
+cargo add "rslock@~0.10.0" --features tokio-comp
 # Or use Smol:
-cargo add "rslock@~0.9.1" --features smol-comp
+cargo add "rslock@~0.10.0" --features smol-comp
 ```
 
 Both backends include Rustls TLS support and can be enabled together. `async-std-comp`
@@ -66,26 +66,22 @@ async fn main() {
     let rl = LockManager::new(uris);
 
     // Acquire a lock
-    let lock = loop {
-        if let Ok(lock) = rl
-            .lock("my_mutex", Duration::from_millis(1000))
-            .await
-        {
-            break lock;
-        }
-    };
+    let guard = rl
+        .acquire("my_mutex", Duration::from_millis(1000))
+        .await
+        .expect("Failed to acquire lock");
 
     println!("Lock acquired!");
 
     // Extend the lock
-    if rl.extend(&lock, Duration::from_millis(1000)).await.is_ok() {
+    if rl.extend(&guard.lock, Duration::from_millis(1000)).await.is_ok() {
         println!("Lock extended!");
     } else {
         println!("Failed to extend the lock.");
     }
 
     // Unlock the lock
-    rl.unlock(&lock).await;
+    guard.release().await;
     println!("Lock released!");
 }
 ```
@@ -104,7 +100,7 @@ Enable `cluster` together with a runtime feature and pass one or more seed-node 
 cluster. The cluster counts as one backend when `rslock` calculates quorum:
 
 ```bash
-cargo add "rslock@~0.9.1" --features cluster,tokio-comp
+cargo add "rslock@~0.10.0" --features cluster,tokio-comp
 ```
 
 For authentication, TLS, address mapping, and other advanced configuration, build a
@@ -116,8 +112,8 @@ Extending a lock effectively renews its duration instead of adding extra time to
 
 ## Tests
 
-The integration tests use Testcontainers and require Docker. Run both the all-features
-and each runtime configuration:
+The integration tests use Testcontainers and require Docker. Run the all-features
+and individual runtime configurations:
 
 ```bash
 cargo test --all-features --all-targets

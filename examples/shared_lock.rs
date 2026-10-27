@@ -74,6 +74,8 @@ async fn main() {
                 println!("Receiver: Failed to extend the lock.");
             }
 
+            // Shared Arc<Lock> ownership uses the borrowed unlock API.
+            // A uniquely owned Lock or LockGuard can use release().await.
             // Release the lock
             lock.lock_manager.unlock(&lock).await;
             println!("Receiver: Lock released.");
